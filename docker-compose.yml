@@ -1,0 +1,30 @@
+version: '3.8'
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8080:8080"
+  client1:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    environment:
+      - SERVER=server:8080
+      - CLIENT_ID=player1
+      - TOPICS=game/1/events,game/1/chat
+    depends_on:
+      - server
+    tty: true
+  client2:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    environment:
+      - SERVER=server:8080
+      - CLIENT_ID=player2
+      - TOPICS=game/1/events
+    depends_on:
+      - server
+    tty: true
