@@ -1,0 +1,274 @@
+{
+  "Leo": {
+    "Login": "Leo",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 80,
+    "Latencia": 0,
+    "SelectedInstrument": {
+      "id": "FLUTE_001",
+      "name": "Flauta",
+      "rarity": "Comum",
+      "attacks": [
+        {
+          "name": "Trinado",
+          "sequence": [
+            "C",
+            "D",
+            "E"
+          ]
+        },
+        {
+          "name": "Sopro Forte",
+          "sequence": [
+            "F",
+            "G",
+            "C"
+          ]
+        },
+        {
+          "name": "Melodia Doce",
+          "sequence": [
+            "A",
+            "B",
+            "C"
+          ]
+        }
+      ]
+    }
+  },
+  "Sa": {
+    "Login": "Sa",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "VIOLIN_001",
+          "name": "Violino",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Vibrato",
+              "sequence": [
+                "A",
+                "B",
+                "G"
+              ]
+            },
+            {
+              "name": "Pizzicato",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Spiccato",
+              "sequence": [
+                "F",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "VIOLIN_001",
+          "name": "Violino",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Vibrato",
+              "sequence": [
+                "A",
+                "B",
+                "G"
+              ]
+            },
+            {
+              "name": "Pizzicato",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Spiccato",
+              "sequence": [
+                "F",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 0,
+    "Latencia": 0,
+    "SelectedInstrument": {
+      "id": "FLUTE_001",
+      "name": "Flauta",
+      "rarity": "Comum",
+      "attacks": [
+        {
+          "name": "Trinado",
+          "sequence": [
+            "C",
+            "D",
+            "E"
+          ]
+        },
+        {
+          "name": "Sopro Forte",
+          "sequence": [
+            "F",
+            "G",
+            "C"
+          ]
+        },
+        {
+          "name": "Melodia Doce",
+          "sequence": [
+            "A",
+            "B",
+            "C"
+          ]
+        }
+      ]
+    }
+  }
+}
