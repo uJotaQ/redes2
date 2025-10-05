@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  # Serviço do Broker MQTT (Mosquitto)
+  broker:
+    image: eclipse-mosquitto:latest
+    hostname: broker
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes: # <-- ADICIONE ESTA SEÇÃO
+      - ./mosquitto/config:/mosquitto/config
+
+  # Serviço do seu Servidor de Jogo
+  server:
+    build: . # Diz ao Compose para construir a imagem usando o Dockerfile na pasta atual
+    container_name: game-server
+    ports:
+      - "8080:8080" # Mapeia a porta 8080 do contêiner para a 8080 da sua máquina
+    depends_on:
+      - broker # Garante que o broker inicie ANTES do seu servidor
+    volumes:
+      - ./data:/app/data # Mapeia a pasta 'data' local para dentro do contêiner
+                         # Isso garante que players.json e instrumentos.json não se percam

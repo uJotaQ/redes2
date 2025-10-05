@@ -60,7 +60,9 @@ type RoomRequest struct {
 }
 
 type PairingMessage struct {
-	Status string `json:"status"`
+	Status      string `json:"status"`
+	SalaID      string `json:"sala_id"`      // <-- ADICIONADO
+	PlayerLogin string `json:"player_login"` // <-- ADICIONADO
 }
 
 // Estruturas para Compra de Pacotes

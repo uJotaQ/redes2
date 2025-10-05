@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"pbl_redes/protocolo"
 )
 
@@ -29,14 +30,13 @@ type User struct {
 	SelectedInstrument *protocolo.Instrumento
 }
 
-// Estrutura para gerenciar o estado de uma partida musical
 type GameState struct {
-	Player1Score     int
-	Player2Score     int
-	PlayedNotes      []string
-	CurrentTurn      int // 1 para Jogador1, 2 para Jogador2
-	GameMutex        sync.Mutex
-	LastAttacker     *User // Guarda quem fez o último ataque para dar a vez
+	Player1Score int
+	Player2Score int
+	PlayedNotes  []string
+	CurrentTurn  int // 1 para Jogador1, 2 para Jogador2
+	GameMutex    sync.Mutex
+	LastAttacker *User
 }
 
 type Sala struct {
@@ -55,14 +55,34 @@ var (
 	salasEmEspera      []*Sala
 	playersInRoom      map[string]*Sala
 	players            map[string]*User
-	instrumentDatabase []protocolo.Instrumento // Banco de dados de instrumentos
-	packetStock        map[string]*protocolo.Packet // Estoque de pacotes
+	instrumentDatabase []protocolo.Instrumento
+	packetStock        map[string]*protocolo.Packet
 	stockMu            sync.RWMutex
 	mu                 sync.Mutex
+	mqttClient         mqtt.Client // Cliente MQTT Global
 )
 
 const playerDataFile = "data/players.json"
 const instrumentDataFile = "data/instrumentos.json"
+
+// --- LÓGICA DE PUBLICAÇÃO MQTT ---
+
+// publishToPlayer envia uma mensagem para o tópico específico de um jogador.
+func publishToPlayer(salaID, login string, message protocolo.Message) {
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		fmt.Println("MQTT client não está conectado, pulando publicação.")
+		return
+	}
+	topic := fmt.Sprintf("game/%s/%s", salaID, login)
+	payload, _ := json.Marshal(message)
+	token := mqttClient.Publish(topic, 0, false, payload)
+	go func() {
+		_ = token.Wait() // Espera a publicação completar, mas não bloqueia
+		if token.Error() != nil {
+			fmt.Printf("Erro ao publicar no tópico %s: %v\n", topic, token.Error())
+		}
+	}()
+}
 
 // --- PERSISTÊNCIA DE DADOS ---
 
@@ -94,7 +114,7 @@ func savePlayerData() {
 	fmt.Printf("Dados de %d jogadores salvos.\n", len(players))
 }
 
-// --- LÓGICA DE LOGIN E CADASTRO ---
+// --- LÓGICA DE LOGIN E CADASTRO (Mantida via TCP para resposta direta) ---
 
 func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	mu.Lock()
@@ -110,6 +130,8 @@ func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	}
 	player.Conn = conn
 	player.Online = true
+	// Informa ao cliente o ID da sala para ele se inscrever no tópico MQTT
+	// (Neste ponto ainda não há sala, mas essa é a ideia para o futuro)
 	msg := protocolo.Message{
 		Type: "LOGIN",
 		Data: protocolo.LoginResponse{
@@ -136,7 +158,7 @@ func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 	sendScreenMsg(conn, "Cadastro realizado com sucesso!")
 }
 
-// --- FUNÇÕES AUXILIARES ---
+// --- FUNÇÕES AUXILIARES (Comunicação TCP direta mantida para mensagens simples) ---
 
 func sendJSON(conn net.Conn, msg protocolo.Message) {
 	if conn == nil {
@@ -183,13 +205,11 @@ func sendScreenMsg(conn net.Conn, text string) {
 func findRoom(conn net.Conn, mode string, roomCode string) {
 	mu.Lock()
 	defer mu.Unlock()
-
 	player := findPlayerByConn(conn)
 	if player.SelectedInstrument == nil {
 		sendScreenMsg(conn, "Você precisa selecionar um instrumento para a batalha primeiro!")
 		return
 	}
-
 	if mode == "PUBLIC" {
 		if len(salasEmEspera) > 0 {
 			sala := salasEmEspera[0]
@@ -198,6 +218,8 @@ func findRoom(conn net.Conn, mode string, roomCode string) {
 			sala.Status = "Em_Jogo"
 			playersInRoom[sala.Jogador1.RemoteAddr().String()] = sala
 			playersInRoom[sala.Jogador2.RemoteAddr().String()] = sala
+			// Envia o pareamento via TCP para ambos os jogadores.
+			// Após isso, a comunicação do jogo será via MQTT.
 			sendPairing(sala.Jogador1)
 			sendPairing(sala.Jogador2)
 			go startGame(sala)
@@ -227,13 +249,11 @@ func findRoom(conn net.Conn, mode string, roomCode string) {
 func createRoom(conn net.Conn) {
 	mu.Lock()
 	defer mu.Unlock()
-
 	player := findPlayerByConn(conn)
 	if player.SelectedInstrument == nil {
 		sendScreenMsg(conn, "Você precisa selecionar um instrumento para a batalha primeiro!")
 		return
 	}
-
 	codigo := randomGenerate(6)
 	novaSala := &Sala{Jogador1: conn, ID: codigo, Status: "Waiting_Player", IsPrivate: true}
 	salas[codigo] = novaSala
@@ -242,11 +262,13 @@ func createRoom(conn net.Conn) {
 }
 
 func sendPairing(conn net.Conn) {
-	msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO"}}
+	p := findPlayerByConn(conn)
+	sala := playersInRoom[conn.RemoteAddr().String()]
+	msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: sala.ID, PlayerLogin: p.Login}}
 	sendJSON(conn, msg)
 }
 
-// --- LÓGICA DO JOGO MUSICAL ---
+// --- LÓGICA DO JOGO MUSICAL (MODIFICADA PARA MQTT) ---
 
 func startGame(sala *Sala) {
 	p1 := findPlayerByConn(sala.Jogador1)
@@ -259,21 +281,24 @@ func startGame(sala *Sala) {
 		CurrentTurn: 1,
 	}
 
-	sendJSON(sala.Jogador1, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
-	sendJSON(sala.Jogador2, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
+	// Publica a mensagem de início de jogo para cada jogador em seu tópico
+	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
+	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
 
 	time.Sleep(1 * time.Second)
 	notifyTurn(sala)
 }
 
 func notifyTurn(sala *Sala) {
-	if sala.Game.CurrentTurn == 1 {
-		sendJSON(sala.Jogador1, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: true}})
-		sendJSON(sala.Jogador2, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: false}})
-	} else {
-		sendJSON(sala.Jogador1, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: false}})
-		sendJSON(sala.Jogador2, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: true}})
+	p1 := findPlayerByConn(sala.Jogador1)
+	p2 := findPlayerByConn(sala.Jogador2)
+	if p1 == nil || p2 == nil {
+		return
 	}
+
+	// Publica a atualização de turno para cada jogador
+	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 1}})
+	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 2}})
 }
 
 func handlePlayNote(conn net.Conn, data interface{}) {
@@ -312,14 +337,14 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 	}
 
 	sala.Game.PlayedNotes = append(sala.Game.PlayedNotes, note)
-	
+
 	p1 := findPlayerByConn(sala.Jogador1)
+	p2 := findPlayerByConn(sala.Jogador2)
 
 	attackName, attacker := checkAttackCompletion(sala)
-	
 	sequenceStr := strings.Join(sala.Game.PlayedNotes, "-")
-	
-	resultMsg := protocolo.RoundResultMessage{
+
+	resultMsgBase := protocolo.RoundResultMessage{
 		PlayedNote:      note,
 		PlayerName:      p.Login,
 		CurrentSequence: sequenceStr,
@@ -327,8 +352,8 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 	}
 
 	if attacker != nil {
-		resultMsg.AttackName = attackName
-		resultMsg.AttackerName = attacker.Login
+		resultMsgBase.AttackName = attackName
+		resultMsgBase.AttackerName = attacker.Login
 		if attacker == p1 {
 			sala.Game.Player1Score++
 		} else {
@@ -337,20 +362,24 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 		sala.Game.PlayedNotes = []string{}
 		sala.Game.LastAttacker = attacker
 	}
-	
-	resultMsg.YourScore = sala.Game.Player1Score
-	resultMsg.OpponentScore = sala.Game.Player2Score
-	sendJSON(sala.Jogador1, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsg})
 
-	resultMsg.YourScore = sala.Game.Player2Score
-	resultMsg.OpponentScore = sala.Game.Player1Score
-	sendJSON(sala.Jogador2, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsg})
+	// Publica o resultado do round para cada jogador
+	resultMsgP1 := resultMsgBase
+	resultMsgP1.YourScore = sala.Game.Player1Score
+	resultMsgP1.OpponentScore = sala.Game.Player2Score
+	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
+
+	resultMsgP2 := resultMsgBase
+	resultMsgP2.YourScore = sala.Game.Player2Score
+	resultMsgP2.OpponentScore = sala.Game.Player1Score
+	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
 
 	if sala.Game.Player1Score >= 2 || sala.Game.Player2Score >= 2 {
 		endGame(sala)
 		return
 	}
 
+	// Define o próximo turno
 	if attacker != nil {
 		if attacker == p1 {
 			sala.Game.CurrentTurn = 1
@@ -393,7 +422,6 @@ func checkAttackCompletion(sala *Sala) (string, *User) {
     return "", nil
 }
 
-
 func endGame(sala *Sala) {
 	game := sala.Game
 	p1 := findPlayerByConn(sala.Jogador1)
@@ -413,21 +441,32 @@ func endGame(sala *Sala) {
 		winner = "EMPATE"
 	}
 
+	// Publica a mensagem de fim de jogo para cada jogador
 	gameOverMsgP1 := protocolo.GameOverMessage{
 		Winner:       winner,
 		FinalScoreP1: game.Player1Score,
 		FinalScoreP2: game.Player2Score,
-		CoinsEarned:  game.Player1Score*5 + (func() int { if winner == p1.Login { return 20 }; return 0 }()),
+		CoinsEarned:  game.Player1Score*5 + (func() int {
+			if winner == p1.Login {
+				return 20
+			}
+			return 0
+		}()),
 	}
-	sendJSON(sala.Jogador1, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
 
 	gameOverMsgP2 := protocolo.GameOverMessage{
 		Winner:       winner,
 		FinalScoreP1: game.Player1Score,
 		FinalScoreP2: game.Player2Score,
-		CoinsEarned:  game.Player2Score*5 + (func() int { if winner == p2.Login { return 20 }; return 0 }()),
+		CoinsEarned:  game.Player2Score*5 + (func() int {
+			if winner == p2.Login {
+				return 20
+			}
+			return 0
+		}()),
 	}
-	sendJSON(sala.Jogador2, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
+	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
 
 	mu.Lock()
 	delete(playersInRoom, sala.Jogador1.RemoteAddr().String())
@@ -437,6 +476,7 @@ func endGame(sala *Sala) {
 	delete(salas, sala.ID)
 	mu.Unlock()
 }
+
 
 // --- LÓGICA DE PACOTES E INSTRUMENTOS ---
 
@@ -609,8 +649,29 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
-	
 	os.Mkdir("data", 0755)
+
+	// --- Conexão MQTT (Código NOVO com retentativas) ---
+	opts := mqtt.NewClientOptions().AddBroker("tcp://broker:1883")
+	opts.SetClientID("game-server-main")
+	mqttClient = mqtt.NewClient(opts)
+
+	maxRetries := 5
+	for i := 0; i < maxRetries; i++ {
+		fmt.Printf("Tentando conectar ao Broker MQTT (tentativa %d/%d)...\n", i+1, maxRetries)
+		if token := mqttClient.Connect(); token.WaitTimeout(3*time.Second) && token.Error() == nil {
+			fmt.Println("Conectado ao Broker MQTT com sucesso.")
+			break // Sai do loop se conectar com sucesso
+		}
+
+		if i+1 == maxRetries {
+			fmt.Println("Não foi possível conectar ao broker MQTT após várias tentativas. Encerrando.")
+			os.Exit(1)
+		}
+		
+    time.Sleep(3 * time.Second) // Espera 3 segundos antes de tentar de novo
+}
+// --- Fim da Conexão MQTT ---
 
 	loadPlayerData()
 	if err := loadInstruments(); err != nil {
@@ -624,6 +685,7 @@ func main() {
 	go func() {
 		<-sigs
 		savePlayerData()
+		mqttClient.Disconnect(250) // Desconecta o cliente MQTT graciosamente
 		os.Exit(0)
 	}()
 
@@ -633,8 +695,8 @@ func main() {
 		return
 	}
 	defer listener.Close()
-	fmt.Println("Servidor iniciado na porta 8080. Pressione Ctrl+C para salvar e fechar.")
-	
+	fmt.Println("Servidor TCP iniciado na porta 8080. Pressione Ctrl+C para salvar e fechar.")
+
 	salas = make(map[string]*Sala)
 	salasEmEspera = make([]*Sala, 0)
 	playersInRoom = make(map[string]*Sala)
@@ -646,4 +708,4 @@ func main() {
 		}
 		go handleConnection(conn)
 	}
-}
+} 
