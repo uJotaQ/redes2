@@ -1,4 +1,172 @@
 {
+  "Admin": {
+    "Login": "Admin",
+    "Senha": "admin",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "UKULE_001",
+          "name": "Ukulele",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Acorde Leve",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Ritmo Havaiano",
+              "sequence": [
+                "D",
+                "G",
+                "A"
+              ]
+            },
+            {
+              "name": "Ponte Alegre",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "DRUM_001",
+          "name": "Bateria",
+          "rarity": "Épico",
+          "attacks": [
+            {
+              "name": "Rufar",
+              "sequence": [
+                "C",
+                "C",
+                "C"
+              ]
+            },
+            {
+              "name": "Virada",
+              "sequence": [
+                "E",
+                "G",
+                "A"
+              ]
+            },
+            {
+              "name": "Prato Explosivo",
+              "sequence": [
+                "F",
+                "B",
+                "E"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "GUITAR_001",
+          "name": "Guitarra",
+          "rarity": "Épico",
+          "attacks": [
+            {
+              "name": "Power Chord",
+              "sequence": [
+                "E",
+                "A",
+                "D"
+              ]
+            },
+            {
+              "name": "Solo Rápido",
+              "sequence": [
+                "G",
+                "B",
+                "E"
+              ]
+            },
+            {
+              "name": "Palm Mute",
+              "sequence": [
+                "E",
+                "E",
+                "A"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "BASS_001",
+          "name": "Contrabaixo",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Slap",
+              "sequence": [
+                "E",
+                "A",
+                "D"
+              ]
+            },
+            {
+              "name": "Walking Bass",
+              "sequence": [
+                "G",
+                "B",
+                "E"
+              ]
+            },
+            {
+              "name": "Grave Profundo",
+              "sequence": [
+                "C",
+                "E",
+                "A"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "BANJO_001",
+          "name": "Banjo",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Dedilhado",
+              "sequence": [
+                "C",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Rasgueado",
+              "sequence": [
+                "D",
+                "A",
+                "E"
+              ]
+            },
+            {
+              "name": "Bluegrass",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 0,
+    "Latencia": 0,
+    "SelectedInstrument": null
+  },
   "Leo": {
     "Login": "Leo",
     "Senha": "123",
