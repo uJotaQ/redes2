@@ -651,27 +651,27 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	os.Mkdir("data", 0755)
 
-	// --- Conexão MQTT (Código NOVO com retentativas) ---
-	opts := mqtt.NewClientOptions().AddBroker("tcp://broker:1883")
+	// --- Conexão MQTT com retentativas e failover ---
+	brokerAddresses := []string{
+		"tcp://broker1:1883",
+		"tcp://broker2:1883",
+		"tcp://broker3:1883",
+	}
+	opts := mqtt.NewClientOptions()
+	for _, addr := range brokerAddresses {
+		opts.AddBroker(addr)
+	}
 	opts.SetClientID("game-server-main")
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+
 	mqttClient = mqtt.NewClient(opts)
-
-	maxRetries := 5
-	for i := 0; i < maxRetries; i++ {
-		fmt.Printf("Tentando conectar ao Broker MQTT (tentativa %d/%d)...\n", i+1, maxRetries)
-		if token := mqttClient.Connect(); token.WaitTimeout(3*time.Second) && token.Error() == nil {
-			fmt.Println("Conectado ao Broker MQTT com sucesso.")
-			break // Sai do loop se conectar com sucesso
-		}
-
-		if i+1 == maxRetries {
-			fmt.Println("Não foi possível conectar ao broker MQTT após várias tentativas. Encerrando.")
-			os.Exit(1)
-		}
-		
-    time.Sleep(3 * time.Second) // Espera 3 segundos antes de tentar de novo
-}
-// --- Fim da Conexão MQTT ---
+	if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+		fmt.Println("Não foi possível conectar a nenhum broker MQTT. Encerrando.")
+		os.Exit(1)
+	}
+	fmt.Println("Conectado ao Broker MQTT com sucesso.")
+	// --- Fim da Conexão MQTT ---
 
 	loadPlayerData()
 	if err := loadInstruments(); err != nil {

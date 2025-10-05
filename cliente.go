@@ -93,13 +93,27 @@ func messageHandler(client mqtt.Client, msg mqtt.Message) {
 }
 
 func setupMQTTClient() {
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:1883")
+	// Lista de endereços dos brokers
+	brokerAddresses := []string{
+		"tcp://127.0.0.1:1883",
+		"tcp://127.0.0.1:1884", // Alterar os IPS pra teste depois
+		"tcp://127.0.0.1:1885",
+	}
+
+	opts := mqtt.NewClientOptions()
+	for _, addr := range brokerAddresses {
+		opts.AddBroker(addr)
+	}
+	
 	opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().Unix()))
 	opts.SetDefaultPublishHandler(messageHandler)
+	// Adiciona lógica de reconexão automática
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
 
 	mqttClient = mqtt.NewClient(opts)
 	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		fmt.Println("Erro fatal ao conectar ao Broker MQTT:", token.Error())
+		fmt.Println("Erro fatal ao conectar a qualquer Broker MQTT:", token.Error())
 		os.Exit(1)
 	}
 	fmt.Println("\n[INFO] Conexão MQTT estabelecida com sucesso.")
