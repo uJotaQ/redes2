@@ -1,19 +1,79 @@
 # Define que os comandos não geram arquivos com esses nomes
-.PHONY: servidor cliente parar build
+.PHONY: all up down build clean cliente \
+        servidor1 servidor2 servidor3 \
+        parar1 parar2 parar3 \
+        logs1 logs2 logs3
 
-# Comando principal para subir o servidor e o broker em primeiro plano
-# O --build garante que qualquer alteração no código seja compilada
-servidor:
-	docker compose up --build
+# --- Comandos de Controle Global ---
 
-# Roda o cliente localmente (ainda sem Docker)
-cliente:
-	go run cliente.go
+# Sobe todo o ambiente (3 servidores + 1 broker)
+up:
+	docker compose up --build -d broker1 servidor1 servidor2 servidor3
 
-# Para e remove os contêineres do servidor e do broker
-parar:
+# Para e remove todos os contêineres
+down:
 	docker compose down --remove-orphans
 
-# Apenas constrói a imagem do servidor, sem iniciar
+# Apenas constrói a imagem, sem iniciar
 build:
 	docker compose build
+
+
+# # Limpa os dados dos servidores (logs do raft, etc.) E corrige a permissão
+# clean:
+# 	@echo "Limpando diretórios de dados com permissão de administrador..."
+#     # 1. Remove os dados antigos
+# 	rm -rf ./data/servidor1 ./data/servidor2 ./data/servidor3
+#     # 2. Recria os diretórios vazios (necessário para o próximo passo)
+# 	mkdir -p ./data/servidor1 ./data/servidor2 ./data/servidor3
+#     # 3. GARANTE que você é o dono dos diretórios vazios recém-criados
+#     sudo chown -R $$(id -u):$$(id -g) ./data
+# 	@echo "Limpeza concluída e permissões corrigidas para o usuário atual."
+
+# --- Comandos de Controle Individual ---
+
+# Inicia o servidor 1 (e o broker, caso não esteja rodando)
+servidor1:
+	docker compose up --build -d broker1 servidor1
+
+# Inicia o servidor 2
+servidor2:
+	docker compose up --build -d servidor2
+
+# Inicia o servidor 3
+servidor3:
+	docker compose up --build -d servidor3
+
+# Para o servidor 1
+parar1:
+	docker compose stop servidor1
+	docker compose rm -f servidor1
+
+# Para o servidor 2
+parar2:
+	docker compose stop servidor2
+	docker compose rm -f servidor2
+
+# Para o servidor 3
+parar3:
+	docker compose stop servidor3
+	docker compose rm -f servidor3
+
+
+# --- Comandos de Visualização e Cliente ---
+
+# Mostra os logs do servidor 1
+logs1:
+	docker compose logs -f servidor1
+
+# Mostra os logs do servidor 2
+logs2:
+	docker compose logs -f servidor2
+
+# Mostra os logs do servidor 3
+logs3:
+	docker compose logs -f servidor3
+
+# Roda o cliente localmente
+cliente:
+	go run cliente.go

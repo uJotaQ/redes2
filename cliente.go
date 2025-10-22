@@ -12,8 +12,9 @@ import (
 	"strings"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"pbl_redes/protocolo"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // Estados do cliente
@@ -39,8 +40,6 @@ var (
 
 // --- LÓGICA DE CONEXÃO E MQTT ---
 
-// messageHandler é a função que será chamada toda vez que uma mensagem
-// chegar em um dos tópicos que o cliente assinou.
 func messageHandler(client mqtt.Client, msg mqtt.Message) {
 	var genericMsg protocolo.Message
 	if err := json.Unmarshal(msg.Payload(), &genericMsg); err != nil {
@@ -48,7 +47,6 @@ func messageHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// Aqui movemos a lógica de tratamento de eventos de jogo que antes estava no interpreter
 	switch genericMsg.Type {
 	case "GAME_START":
 		var data protocolo.GameStartMessage
@@ -85,7 +83,7 @@ func messageHandler(client mqtt.Client, msg mqtt.Message) {
 			fmt.Printf("💀 Você perdeu. O vencedor é: %s\n", data.Winner)
 		}
 		fmt.Printf("Você ganhou %d moedas!\n", data.CoinsEarned)
-		currentBalance += data.CoinsEarned
+		currentBalance += data.CoinsEarned // Atualiza saldo local
 		fmt.Println("Voltando para o menu principal em 5 segundos...")
 		time.Sleep(5 * time.Second)
 		currentState = MenuState
@@ -93,48 +91,80 @@ func messageHandler(client mqtt.Client, msg mqtt.Message) {
 }
 
 func setupMQTTClient() {
-	// Lista de endereços dos brokers
-	brokerAddresses := []string{
-		"tcp://127.0.0.1:1883",
-		"tcp://127.0.0.1:1884", // Alterar os IPS pra teste depois
-		"tcp://127.0.0.1:1885",
-	}
-
 	opts := mqtt.NewClientOptions()
-	for _, addr := range brokerAddresses {
-		opts.AddBroker(addr)
-	}
-	
-	opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().Unix()))
+	// Conecta ao broker exposto pelo Docker no localhost
+	opts.AddBroker("tcp://127.0.0.1:1883")
+	// Cria um ID único para evitar conflitos se rodar múltiplos clientes
+	opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().UnixNano()))
 	opts.SetDefaultPublishHandler(messageHandler)
-	// Adiciona lógica de reconexão automática
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
+	// Define um callback para quando a conexão for perdida
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		fmt.Printf("\n[MQTT] Conexão perdida: %v. Tentando reconectar...\n", err)
+	})
+	// Define um callback para quando a conexão for reestabelecida
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		fmt.Println("\n[MQTT] Conexão reestabelecida!")
+		// Se o usuário estiver logado, poderia tentar se reinscrever nos tópicos aqui,
+		// mas a lógica atual de re-inscrição após PAREADO é suficiente por enquanto.
+	})
 
 	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		fmt.Println("Erro fatal ao conectar a qualquer Broker MQTT:", token.Error())
-		os.Exit(1)
+	if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+		fmt.Println("[AVISO] Não foi possível conectar ao Broker MQTT:", token.Error())
+		// Não encerra o programa, o cliente tentará reconectar em background
+	} else if token.Error() == nil {
+		fmt.Println("\n[INFO] Conexão MQTT inicial estabelecida.")
 	}
-	fmt.Println("\n[INFO] Conexão MQTT estabelecida com sucesso.")
 }
 
 func subscribeToGameTopic(salaID, playerLogin string) {
-	topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
-	if token := mqttClient.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
-		fmt.Printf("Erro ao se inscrever no tópico do jogo: %v\n", token.Error())
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		fmt.Println("[AVISO] Cliente MQTT não conectado. Não foi possível se inscrever no tópico do jogo.")
 		return
 	}
-	fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
+	topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
+	// Usa QOS 1 para maior garantia de entrega das mensagens de jogo
+	if token := mqttClient.Subscribe(topic, 1, nil); token.WaitTimeout(3*time.Second) && token.Error() != nil {
+		fmt.Printf("[ERRO] Falha ao se inscrever no tópico do jogo %s: %v\n", topic, token.Error())
+	} else if token.Error() == nil {
+		fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
+	}
+}
+
+// Desinscreve do tópico no final do jogo ou desconexão
+func unsubscribeFromGameTopic(salaID, playerLogin string) {
+	if mqttClient != nil && mqttClient.IsConnected() {
+		topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
+		if token := mqttClient.Unsubscribe(topic); token.WaitTimeout(3*time.Second) && token.Error() != nil {
+			fmt.Printf("[ERRO] Falha ao desinscrever do tópico %s: %v\n", topic, token.Error())
+		} else if token.Error() == nil {
+			fmt.Printf("[INFO] Desinscrito do tópico da partida: %s\n", topic)
+		}
+	}
 }
 
 // --- FUNÇÕES AUXILIARES ---
 
-func sendJSON(writer *bufio.Writer, msg protocolo.Message) {
-	jsonData, _ := json.Marshal(msg)
-	writer.Write(jsonData)
-	writer.WriteString("\n")
-	writer.Flush()
+func sendJSON(writer *bufio.Writer, msg protocolo.Message) error {
+	if writer == nil {
+		return fmt.Errorf("writer é nil")
+	}
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("erro ao codificar JSON: %v", err)
+	}
+	if _, err := writer.Write(jsonData); err != nil {
+		return fmt.Errorf("erro ao escrever dados: %v", err)
+	}
+	if _, err := writer.WriteString("\n"); err != nil {
+		return fmt.Errorf("erro ao escrever newline: %v", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("erro ao fazer flush: %v", err)
+	}
+	return nil
 }
 
 func mapToStruct(input interface{}, target interface{}) error {
@@ -205,185 +235,293 @@ func selectInstrument(writer *bufio.Writer, reader *bufio.Reader) {
 		return
 	}
 	req := protocolo.SelectInstrumentRequest{InstrumentoID: choice - 1}
-	sendJSON(writer, protocolo.Message{Type: "SELECT_INSTRUMENT", Data: req})
+	if err := sendJSON(writer, protocolo.Message{Type: "SELECT_INSTRUMENT", Data: req}); err != nil {
+		fmt.Printf("[ERRO] Falha ao enviar seleção de instrumento: %v\n", err)
+	}
+
 }
 
 func handleGameTurn(writer *bufio.Writer, reader *bufio.Reader) {
 	fmt.Print("Sua vez! Digite uma nota (A-G): ")
 	note := readLine(reader)
-	// A ação do jogador ainda é enviada via TCP para o servidor processar
 	req := protocolo.PlayNoteRequest{Note: strings.ToUpper(note)}
-	sendJSON(writer, protocolo.Message{Type: "PLAY_NOTE", Data: req})
+	if err := sendJSON(writer, protocolo.Message{Type: "PLAY_NOTE", Data: req}); err != nil {
+		fmt.Printf("[ERRO] Falha ao enviar nota: %v\n", err)
+		// Se falhar ao enviar a nota, talvez o jogador deva voltar ao menu?
+		// Por enquanto, apenas mudamos o estado.
+	}
+
 	isMyTurn = false
-	currentState = InGameState // Aguarda resultado via MQTT
+	currentState = InGameState // Volta a aguardar mensagens MQTT
 }
 
 // --- INTERPRETADOR DE MENSAGENS TCP ---
 
-func interpreterTCP(conn net.Conn, writer *bufio.Writer, gameChannel chan protocolo.Message) {
+func interpreterTCP(conn net.Conn, gameChannel chan protocolo.Message) {
+	// Garante que o canal seja fechado ao sair da função, sinalizando a desconexão
+	defer close(gameChannel)
+
 	reader := bufio.NewReader(conn)
 	for {
 		message, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
-				fmt.Println("\nConexão com o servidor perdida.")
+				fmt.Println("\n\n[INFO] Conexão com o servidor foi fechada.")
+			} else {
+				// Mostra o erro específico se não for EOF
+				fmt.Printf("\n\n[ERRO] Erro na leitura da conexão TCP: %v\n", err)
 			}
-			os.Exit(0)
+			return // Encerra a goroutine e o defer fecha o canal
 		}
 
 		var msg protocolo.Message
-		json.Unmarshal([]byte(message), &msg)
-
-		// O channel agora envia a mensagem completa para a main thread
+		if err := json.Unmarshal([]byte(message), &msg); err != nil {
+			fmt.Printf("[AVISO] Recebida mensagem TCP inválida: %v\n", err)
+			continue // Ignora a mensagem inválida e continua lendo
+		}
+		// Envia a mensagem válida para o canal
 		gameChannel <- msg
 	}
 }
 
 // --- FUNÇÃO MAIN ---
 
-func main() {
-	rand.Seed(time.Now().UnixNano())
-
-	// Lista de servidores para o balanceamento de carga aleatório
-	serverAddresses := []string{
-		"127.0.0.1:8080",
-		// "127.0.0.1:8081", // Adicione outros servidores aqui quando tiver
-		// "127.0.0.1:8082",
-	}
-
+func connectToServer(addresses []string) net.Conn {
 	var conn net.Conn
 	var err error
 
-	// Loop de retentativa e seleção aleatória
-	for {
-		// Escolhe um servidor aleatório da lista
-		address := serverAddresses[rand.Intn(len(serverAddresses))]
+	rand.Shuffle(len(addresses), func(i, j int) {
+		addresses[i], addresses[j] = addresses[j], addresses[i]
+	})
+
+	for _, address := range addresses {
 		fmt.Printf("Tentando conectar ao servidor %s...\n", address)
-
-		conn, err = net.Dial("tcp", address)
+		conn, err = net.DialTimeout("tcp", address, 3*time.Second)
 		if err == nil {
-			// Se conectou, sai do loop
-			break
+			fmt.Printf("Conectado com sucesso ao servidor %s\n", conn.RemoteAddr())
+			return conn
 		}
-		fmt.Printf("Falha ao conectar: %v. Tentando outro em 2 segundos...\n", err)
-		time.Sleep(2 * time.Second)
+		fmt.Printf("Falha ao conectar em %s: %v\n", address, err)
 	}
-	defer conn.Close()
-	fmt.Printf("Conectado com sucesso ao servidor %s\n", conn.RemoteAddr())
+	return nil
+}
 
-	writer := bufio.NewWriter(conn)
-	// O channel agora transporta a mensagem inteira, não apenas uma string
-	gameChannel := make(chan protocolo.Message)
-	go interpreterTCP(conn, writer, gameChannel)
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	serverAddresses := []string{
+		"127.0.0.1:8081",
+		"127.0.0.1:8082",
+		"127.0.0.1:8083",
+	}
 
 	userInputReader := bufio.NewReader(os.Stdin)
-	currentState = LoginState
 
+ReconnectLoop:
 	for {
-		select {
-		case msg := <-gameChannel:
-			// A main thread agora processa todas as mensagens TCP
-			switch msg.Type {
-			case "LOGIN":
-				var data protocolo.LoginResponse
-				mapToStruct(msg.Data, &data)
-				if data.Status == "LOGADO" {
-					fmt.Println("Login bem-sucedido!")
-					currentBalance = data.Saldo
-					currentInventario = data.Inventario
-					currentState = MenuState
-					// Após logar, estabelece a conexão MQTT
-					go setupMQTTClient()
-				} else {
-					fmt.Println("Falha no login.")
-					currentState = LoginState
-				}
-			case "PAREADO":
-				var data protocolo.PairingMessage
-				mapToStruct(msg.Data, &data)
-				currentState = InGameState
-				fmt.Println("\nPartida encontrada! Aguarde o início...")
-				// Após ser pareado, se inscreve no tópico específico do jogo
-				subscribeToGameTopic(data.SalaID, data.PlayerLogin)
-			case "SCREEN_MSG":
-				var data protocolo.ScreenMessage
-				mapToStruct(msg.Data, &data)
-				fmt.Println("\n[SERVIDOR]: " + data.Content)
-			case "COMPRA_RESPONSE":
-				var data protocolo.CompraResponse
-				mapToStruct(msg.Data, &data)
-				if data.Status == "COMPRA_APROVADA" {
-					fmt.Printf("\n🎉 Você conseguiu um novo instrumento: %s (%s)!\n", data.NovoInstrumento.Name, data.NovoInstrumento.Rarity)
-					currentInventario = data.Inventario
-				}
-				currentState = MenuState
-			case "BALANCE_RESPONSE":
-				var data protocolo.BalanceResponse
-				mapToStruct(msg.Data, &data)
-				fmt.Printf("\nSeu saldo atual: %d moedas.\n", data.Saldo)
-				currentBalance = data.Saldo
-			}
-		default:
-			// Loop não bloqueante
+		conn := connectToServer(serverAddresses)
+		if conn == nil {
+			fmt.Println("Nenhum servidor disponível. Tentando novamente em 5 segundos...")
+			time.Sleep(5 * time.Second)
+			continue ReconnectLoop
 		}
 
-		// A máquina de estados continua igual, mas agora é controlada pela main thread
-		switch currentState {
-		case LoginState:
-			showLoginMenu()
-			choice := readLine(userInputReader)
-			if choice == "1" {
-				fmt.Print("Login: ")
-				login := readLine(userInputReader)
-				fmt.Print("Senha: ")
-				senha := readLine(userInputReader)
-				currentUser = login
-				sendJSON(writer, protocolo.Message{Type: "LOGIN", Data: protocolo.LoginRequest{Login: login, Senha: senha}})
-				currentState = StopState
-			} else if choice == "2" {
-				fmt.Print("Escolha um login: ")
-				login := readLine(userInputReader)
-				fmt.Print("Escolha uma senha: ")
-				senha := readLine(userInputReader)
-				sendJSON(writer, protocolo.Message{Type: "CADASTRO", Data: protocolo.SignInRequest{Login: login, Senha: senha}})
-			} else if choice == "0" {
-				sendJSON(writer, protocolo.Message{Type: "QUIT"})
-				return
-			}
-		case MenuState:
-			showMainMenu()
-			choice := readLine(userInputReader)
-			switch choice {
-			case "1":
-				sendJSON(writer, protocolo.Message{Type: "FIND_ROOM", Data: protocolo.RoomRequest{Mode: "PUBLIC"}})
-				currentState = WaitingState
-			case "2":
-				fmt.Print("Digite o código da sala: ")
-				code := readLine(userInputReader)
-				sendJSON(writer, protocolo.Message{Type: "PRIV_ROOM", Data: protocolo.RoomRequest{RoomCode: code}})
-				currentState = WaitingState
-			case "3":
-				sendJSON(writer, protocolo.Message{Type: "CREATE_ROOM"})
-				currentState = WaitingState
-			case "4":
-				sendJSON(writer, protocolo.Message{Type: "COMPRA"})
-				currentState = StopState
-			case "5":
-				showInventory()
-			case "6":
-				selectInstrument(writer, userInputReader)
-			case "7":
-				sendJSON(writer, protocolo.Message{Type: "CHECK_BALANCE"})
-			case "0":
-				sendJSON(writer, protocolo.Message{Type: "QUIT"})
-				return
-			default:
-				fmt.Println("Opção inválida.")
-			}
-		case TurnState:
-			handleGameTurn(writer, userInputReader)
-		case WaitingState, InGameState, StopState:
-			time.Sleep(200 * time.Millisecond)
+		writer := bufio.NewWriter(conn)
+		gameChannel := make(chan protocolo.Message)
+		// Inicia a goroutine para ler da conexão
+		go interpreterTCP(conn, gameChannel)
+
+		// Reseta o estado apenas se for a primeira conexão
+		if currentUser == "" {
+			currentState = LoginState
+		} else {
+			// Se já estava logado, talvez volte ao Menu? Ou tente um Reconnect?
+			// Por enquanto, vamos manter o estado, mas pode precisar de lógica de re-autenticação.
+			fmt.Println("[INFO] Reconectado. Voltando ao menu principal.")
+			currentState = MenuState // Volta ao menu após reconectar
 		}
-	}
+
+		// Loop principal do jogo/aplicação
+		for {
+			select {
+			case msg, ok := <-gameChannel:
+				if !ok { // Canal foi fechado pela interpreterTCP (desconexão)
+					fmt.Println("\n[INFO] Conexão perdida. Iniciando processo de reconexão...")
+					// Não precisa fechar conn aqui, DialTimeout já falhou ou interpreterTCP retornou
+					time.Sleep(2 * time.Second) // Pequena pausa antes de tentar reconectar
+					continue ReconnectLoop      // Volta ao loop externo para tentar nova conexão
+				}
+
+				// Processa mensagens recebidas do servidor via TCP
+				switch msg.Type {
+				case "LOGIN":
+					var data protocolo.LoginResponse
+					mapToStruct(msg.Data, &data)
+					if data.Status == "LOGADO" {
+						fmt.Println("Login bem-sucedido!")
+						currentBalance = data.Saldo
+						currentInventario = data.Inventario
+						currentState = MenuState
+						// Inicia a conexão MQTT APÓS o login TCP bem-sucedido
+						go setupMQTTClient()
+					} else if data.Status == "ONLINE_JA" {
+						fmt.Println("Login falhou: Usuário já está online em outra sessão.")
+						currentState = LoginState
+					} else if data.Status == "N_EXIST" {
+						fmt.Println("Login falhou: Usuário não existe.")
+						currentState = LoginState
+					} else {
+						fmt.Println("Login falhou: Senha incorreta ou erro desconhecido.")
+						currentState = LoginState
+					}
+				case "PAREADO":
+					var data protocolo.PairingMessage
+					mapToStruct(msg.Data, &data)
+					if data.Status == "PAREADO" {
+						currentState = InGameState // Muda para InGameState ao ser pareado
+						fmt.Println("\nPartida encontrada! Aguarde o início via MQTT...")
+						// Se inscreve no tópico MQTT após confirmação de pareamento
+						subscribeToGameTopic(data.SalaID, data.PlayerLogin)
+					} else {
+						// Pode haver outros status de pareamento? (ex: FALHOU)
+						fmt.Println("\n[AVISO] Falha no pareamento ou status desconhecido:", data.Status)
+						currentState = MenuState // Volta ao menu se o pareamento falhar
+					}
+				case "SCREEN_MSG":
+					var data protocolo.ScreenMessage
+					mapToStruct(msg.Data, &data)
+					fmt.Println("\n[SERVIDOR]: " + data.Content)
+				case "COMPRA_RESPONSE":
+					var data protocolo.CompraResponse
+					mapToStruct(msg.Data, &data)
+					switch data.Status {
+					case "COMPRA_APROVADA":
+						fmt.Printf("\n🎉 Você conseguiu um novo instrumento: %s (%s)!\n", data.NovoInstrumento.Name, data.NovoInstrumento.Rarity)
+						currentInventario = data.Inventario // Atualiza inventário local
+						currentBalance -= 20                // Assume que custou 20, idealmente o servidor confirmaria o novo saldo
+						fmt.Printf("Saldo atual: %d moedas.\n", currentBalance)
+					case "NO_BALANCE":
+						fmt.Println("\nCompra falhou: Saldo insuficiente.")
+					case "EMPTY_STORAGE":
+						fmt.Println("\nCompra falhou: Loja sem estoque no momento.")
+					case "RAFT_ERROR":
+						fmt.Println("\nCompra falhou: Erro interno do servidor. Tente novamente.")
+					default:
+						fmt.Println("\nResposta da compra desconhecida:", data.Status)
+					}
+					currentState = MenuState // Volta ao menu após a tentativa de compra
+				case "BALANCE_RESPONSE":
+					var data protocolo.BalanceResponse
+					mapToStruct(msg.Data, &data)
+					fmt.Printf("\nSeu saldo atual: %d moedas.\n", data.Saldo)
+					currentBalance = data.Saldo // Atualiza saldo local
+				default:
+					fmt.Printf("\n[AVISO] Mensagem TCP de tipo desconhecido recebida: %s\n", msg.Type)
+				}
+
+			default:
+				// Executa a lógica da máquina de estados apenas se não houver mensagem no canal
+				// Evita processar input do usuário enquanto processa mensagem do servidor
+
+				// --- Máquina de Estados para Input do Usuário ---
+				switch currentState {
+				case LoginState:
+					showLoginMenu()
+					choice := readLine(userInputReader)
+					if choice == "1" {
+						fmt.Print("Login: ")
+						login := readLine(userInputReader)
+						fmt.Print("Senha: ")
+						senha := readLine(userInputReader)
+						currentUser = login // Guarda o login ANTES de enviar
+						if err := sendJSON(writer, protocolo.Message{Type: "LOGIN", Data: protocolo.LoginRequest{Login: login, Senha: senha}}); err != nil {
+							fmt.Printf("[ERRO] Falha ao enviar login: %v\n", err)
+							// Se falhar ao enviar, talvez devesse tentar reconectar?
+							// Por enquanto, apenas continua no estado de login.
+							currentState = LoginState
+						} else {
+							currentState = StopState // Aguarda resposta do servidor
+						}
+					} else if choice == "2" {
+						fmt.Print("Escolha um login: ")
+						login := readLine(userInputReader)
+						fmt.Print("Escolha uma senha: ")
+						senha := readLine(userInputReader)
+						if err := sendJSON(writer, protocolo.Message{Type: "CADASTRO", Data: protocolo.SignInRequest{Login: login, Senha: senha}}); err != nil {
+							fmt.Printf("[ERRO] Falha ao enviar cadastro: %v\n", err)
+						}
+						// Continua no LoginState após tentar cadastrar
+					} else if choice == "0" {
+						fmt.Println("Saindo...")
+						if err := sendJSON(writer, protocolo.Message{Type: "QUIT"}); err != nil {
+							fmt.Printf("[AVISO] Falha ao enviar QUIT: %v\n", err)
+						}
+						time.Sleep(100 * time.Millisecond) // Pequena pausa
+						conn.Close()                       // Fecha a conexão localmente
+						return                             // Encerra o programa
+					} else {
+						fmt.Println("Opção inválida.")
+					}
+				case MenuState:
+					showMainMenu()
+					choice := readLine(userInputReader)
+					var sendErr error
+					switch choice {
+					case "1":
+						sendErr = sendJSON(writer, protocolo.Message{Type: "FIND_ROOM", Data: protocolo.RoomRequest{Mode: "PUBLIC"}})
+						if sendErr == nil {
+							currentState = WaitingState
+						}
+					case "2":
+						fmt.Print("Digite o código da sala: ")
+						code := readLine(userInputReader)
+						sendErr = sendJSON(writer, protocolo.Message{Type: "PRIV_ROOM", Data: protocolo.RoomRequest{RoomCode: code}})
+						if sendErr == nil {
+							currentState = WaitingState
+						}
+					case "3":
+						sendErr = sendJSON(writer, protocolo.Message{Type: "CREATE_ROOM"})
+						if sendErr == nil {
+							currentState = WaitingState
+						}
+					case "4":
+						sendErr = sendJSON(writer, protocolo.Message{Type: "COMPRA"})
+						if sendErr == nil {
+							currentState = StopState
+						} // Aguarda resposta da compra
+					case "5":
+						showInventory()
+					case "6":
+						selectInstrument(writer, userInputReader) // Envio é feito dentro da função
+					case "7":
+						sendErr = sendJSON(writer, protocolo.Message{Type: "CHECK_BALANCE"})
+						// Continua no MenuState após pedir saldo
+					case "0":
+						fmt.Println("Saindo...")
+						sendErr = sendJSON(writer, protocolo.Message{Type: "QUIT"})
+						time.Sleep(100 * time.Millisecond) // Pequena pausa
+						conn.Close()                       // Fecha a conexão localmente
+						// Se o envio falhou, ainda sai
+						return // Encerra o programa
+					default:
+						fmt.Println("Opção inválida.")
+					}
+					// Se houve erro ao enviar a mensagem, informa o usuário e permanece no menu
+					if sendErr != nil {
+						fmt.Printf("[ERRO] Falha ao enviar comando para o servidor: %v\n", sendErr)
+						currentState = MenuState // Garante que volta ao menu
+					}
+
+				case TurnState:
+					handleGameTurn(writer, userInputReader) // Envio é feito dentro da função
+
+				case WaitingState, InGameState, StopState:
+					// Estados onde o cliente principalmente espera por mensagens (TCP ou MQTT)
+					// Adiciona um pequeno sleep para evitar uso excessivo de CPU no loop default
+					time.Sleep(100 * time.Millisecond)
+				}
+				// Fim da máquina de estados
+			} // Fim do select
+		} // Fim do GameProcessingLoop
+	} // Fim do ReconnectLoop
 }

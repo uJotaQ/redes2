@@ -1,39 +1,74 @@
-version: '3.8'
+
 
 services:
-  # Três instâncias independentes do Broker
   broker1:
-    image: eclipse-mosquitto:latest
-    hostname: broker1
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
+    image: eclipse-mosquitto:2
+    container_name: broker1
+    networks:
+      - jogo-distribuido-net
     ports:
-      - "1883:1883" # Broker principal
+      - "1883:1883"
+      - "9001:9001"
 
-  broker2:
-    image: eclipse-mosquitto:latest
-    hostname: broker2
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
-    ports:
-      - "1884:1883" # Broker de backup 1
-
-  broker3:
-    image: eclipse-mosquitto:latest
-    hostname: broker3
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
-    ports:
-      - "1885:1883" # Broker de backup 2
-
-  server:
+  servidor1:
     build: .
-    container_name: game-server
+    container_name: servidor1
+    networks:
+      - jogo-distribuido-net
     ports:
-      - "8080:8080"
-    depends_on:
-      - broker1
-      - broker2
-      - broker3
+      - "8081:8080"
+      - "8091:8090"
     volumes:
       - ./data:/app/data
+    command:
+      - "/server"
+      - "-id=servidor1"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor1:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE TENTA SE JUNTAR AOS OUTROS
+      - "-join_addrs=servidor2:8090,servidor3:8090"
+
+  servidor2:
+    build: .
+    container_name: servidor2
+    networks:
+      - jogo-distribuido-net
+    ports:
+      - "8082:8080"
+      - "8092:8090"
+    volumes:
+      - ./data:/app/data
+    # REMOVIDO O depends_on
+    command:
+      - "/server"
+      - "-id=servidor2"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor2:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE CONHECE TODOS OS OUTROS
+      - "-join_addrs=servidor1:8090,servidor3:8090"
+
+  servidor3:
+    build: .
+    container_name: servidor3
+    networks:
+      - jogo-distribuido-net
+    ports:
+      - "8083:8080"
+      - "8093:8090"
+    volumes:
+      - ./data:/app/data
+    # REMOVIDO O depends_on
+    command:
+      - "/server"
+      - "-id=servidor3"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor3:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE CONHECE TODOS OS OUTROS
+      - "-join_addrs=servidor1:8090,servidor2:8090"
+
+networks:
+  jogo-distribuido-net:
+    driver: bridge

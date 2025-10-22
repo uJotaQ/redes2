@@ -2,19 +2,43 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
+	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"pbl_redes/protocolo"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
+)
+
+// --- Constantes de Cores para Logs ---
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorCyan   = "\033[36m"
+)
+
+// --- Logger Personalizado ---
+var (
+	logger *log.Logger
 )
 
 // --- ESTRUTURAS DE DADOS DO SERVIDOR ---
@@ -34,7 +58,7 @@ type GameState struct {
 	Player1Score int
 	Player2Score int
 	PlayedNotes  []string
-	CurrentTurn  int // 1 para Jogador1, 2 para Jogador2
+	CurrentTurn  int
 	GameMutex    sync.Mutex
 	LastAttacker *User
 }
@@ -59,32 +83,46 @@ var (
 	packetStock        map[string]*protocolo.Packet
 	stockMu            sync.RWMutex
 	mu                 sync.Mutex
-	mqttClient         mqtt.Client // Cliente MQTT Global
+	mqttClient         mqtt.Client
+	raftNode           *raft.Raft
 )
 
-const playerDataFile = "data/players.json"
-const instrumentDataFile = "data/instrumentos.json"
+// --- RAFT FSM (FINITE STATE MACHINE) ---
+type FSM struct{}
+
+func (f *FSM) Apply(log *raft.Log) interface{} {
+	// logger.Printf("FSM.Apply: aplicando log: %s", string(log.Data))
+	return nil
+}
+func (f *FSM) Snapshot() (raft.FSMSnapshot, error) { return &fsmSnapshot{}, nil }
+func (f *FSM) Restore(rc io.ReadCloser) error      { return nil }
+
+type fsmSnapshot struct{}
+
+func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error { return sink.Close() }
+func (s *fsmSnapshot) Release()                             {}
 
 // --- LÓGICA DE PUBLICAÇÃO MQTT ---
 
-// publishToPlayer envia uma mensagem para o tópico específico de um jogador.
 func publishToPlayer(salaID, login string, message protocolo.Message) {
 	if mqttClient == nil || !mqttClient.IsConnected() {
-		fmt.Println("MQTT client não está conectado, pulando publicação.")
+		logger.Println(ColorYellow + "AVISO: Cliente MQTT não está conectado, pulando publicação." + ColorReset)
 		return
 	}
 	topic := fmt.Sprintf("game/%s/%s", salaID, login)
 	payload, _ := json.Marshal(message)
 	token := mqttClient.Publish(topic, 0, false, payload)
 	go func() {
-		_ = token.Wait() // Espera a publicação completar, mas não bloqueia
+		_ = token.Wait()
 		if token.Error() != nil {
-			fmt.Printf("Erro ao publicar no tópico %s: %v\n", topic, token.Error())
+			logger.Printf(ColorRed+"Erro ao publicar no tópico %s: %v"+ColorReset, topic, token.Error())
 		}
 	}()
 }
 
 // --- PERSISTÊNCIA DE DADOS ---
+const playerDataFile = "data/players.json"
+const instrumentDataFile = "data/instrumentos.json"
 
 func loadPlayerData() {
 	mu.Lock()
@@ -92,17 +130,17 @@ func loadPlayerData() {
 	data, err := os.ReadFile(playerDataFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("Arquivo de jogadores (%s) não encontrado. Um novo será criado.\n", playerDataFile)
+			logger.Printf("Arquivo de jogadores (%s) não encontrado. Um novo será criado.", playerDataFile)
 			players = make(map[string]*User)
 		}
 		return
 	}
 	json.Unmarshal(data, &players)
-	fmt.Printf("%d jogadores carregados.\n", len(players))
+	logger.Printf("%d jogadores carregados.", len(players))
 }
 
 func savePlayerData() {
-	fmt.Println("\nSalvando dados dos jogadores...")
+	logger.Println("\nSalvando dados dos jogadores...")
 	mu.Lock()
 	defer mu.Unlock()
 	for _, player := range players {
@@ -111,10 +149,10 @@ func savePlayerData() {
 	}
 	data, _ := json.MarshalIndent(players, "", "  ")
 	os.WriteFile(playerDataFile, data, 0644)
-	fmt.Printf("Dados de %d jogadores salvos.\n", len(players))
+	logger.Printf("Dados de %d jogadores salvos.", len(players))
 }
 
-// --- LÓGICA DE LOGIN E CADASTRO (Mantida via TCP para resposta direta) ---
+// --- LÓGICA DE LOGIN E CADASTRO ---
 
 func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	mu.Lock()
@@ -130,8 +168,6 @@ func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	}
 	player.Conn = conn
 	player.Online = true
-	// Informa ao cliente o ID da sala para ele se inscrever no tópico MQTT
-	// (Neste ponto ainda não há sala, mas essa é a ideia para o futuro)
 	msg := protocolo.Message{
 		Type: "LOGIN",
 		Data: protocolo.LoginResponse{
@@ -158,7 +194,7 @@ func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 	sendScreenMsg(conn, "Cadastro realizado com sucesso!")
 }
 
-// --- FUNÇÕES AUXILIARES (Comunicação TCP direta mantida para mensagens simples) ---
+// --- FUNÇÕES AUXILIARES ---
 
 func sendJSON(conn net.Conn, msg protocolo.Message) {
 	if conn == nil {
@@ -218,8 +254,6 @@ func findRoom(conn net.Conn, mode string, roomCode string) {
 			sala.Status = "Em_Jogo"
 			playersInRoom[sala.Jogador1.RemoteAddr().String()] = sala
 			playersInRoom[sala.Jogador2.RemoteAddr().String()] = sala
-			// Envia o pareamento via TCP para ambos os jogadores.
-			// Após isso, a comunicação do jogo será via MQTT.
 			sendPairing(sala.Jogador1)
 			sendPairing(sala.Jogador2)
 			go startGame(sala)
@@ -268,7 +302,7 @@ func sendPairing(conn net.Conn) {
 	sendJSON(conn, msg)
 }
 
-// --- LÓGICA DO JOGO MUSICAL (MODIFICADA PARA MQTT) ---
+// --- LÓGICA DO JOGO MUSICAL ---
 
 func startGame(sala *Sala) {
 	p1 := findPlayerByConn(sala.Jogador1)
@@ -281,7 +315,6 @@ func startGame(sala *Sala) {
 		CurrentTurn: 1,
 	}
 
-	// Publica a mensagem de início de jogo para cada jogador em seu tópico
 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
 
@@ -296,7 +329,6 @@ func notifyTurn(sala *Sala) {
 		return
 	}
 
-	// Publica a atualização de turno para cada jogador
 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 1}})
 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 2}})
 }
@@ -363,7 +395,6 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 		sala.Game.LastAttacker = attacker
 	}
 
-	// Publica o resultado do round para cada jogador
 	resultMsgP1 := resultMsgBase
 	resultMsgP1.YourScore = sala.Game.Player1Score
 	resultMsgP1.OpponentScore = sala.Game.Player2Score
@@ -379,7 +410,6 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 		return
 	}
 
-	// Define o próximo turno
 	if attacker != nil {
 		if attacker == p1 {
 			sala.Game.CurrentTurn = 1
@@ -399,27 +429,27 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 }
 
 func checkAttackCompletion(sala *Sala) (string, *User) {
-    p1 := findPlayerByConn(sala.Jogador1)
-    p2 := findPlayerByConn(sala.Jogador2)
-    sequence := strings.Join(sala.Game.PlayedNotes, "")
+	p1 := findPlayerByConn(sala.Jogador1)
+	p2 := findPlayerByConn(sala.Jogador2)
+	sequence := strings.Join(sala.Game.PlayedNotes, "")
 
-    if p1.SelectedInstrument != nil {
-        for _, attack := range p1.SelectedInstrument.Attacks {
-            attackSeq := strings.Join(attack.Sequence, "")
-            if strings.HasSuffix(sequence, attackSeq) {
-                return attack.Name, p1
-            }
-        }
-    }
-    if p2.SelectedInstrument != nil {
-        for _, attack := range p2.SelectedInstrument.Attacks {
-            attackSeq := strings.Join(attack.Sequence, "")
-            if strings.HasSuffix(sequence, attackSeq) {
-                return attack.Name, p2
-            }
-        }
-    }
-    return "", nil
+	if p1.SelectedInstrument != nil {
+		for _, attack := range p1.SelectedInstrument.Attacks {
+			attackSeq := strings.Join(attack.Sequence, "")
+			if strings.HasSuffix(sequence, attackSeq) {
+				return attack.Name, p1
+			}
+		}
+	}
+	if p2.SelectedInstrument != nil {
+		for _, attack := range p2.SelectedInstrument.Attacks {
+			attackSeq := strings.Join(attack.Sequence, "")
+			if strings.HasSuffix(sequence, attackSeq) {
+				return attack.Name, p2
+			}
+		}
+	}
+	return "", nil
 }
 
 func endGame(sala *Sala) {
@@ -441,12 +471,11 @@ func endGame(sala *Sala) {
 		winner = "EMPATE"
 	}
 
-	// Publica a mensagem de fim de jogo para cada jogador
 	gameOverMsgP1 := protocolo.GameOverMessage{
 		Winner:       winner,
 		FinalScoreP1: game.Player1Score,
 		FinalScoreP2: game.Player2Score,
-		CoinsEarned:  game.Player1Score*5 + (func() int {
+		CoinsEarned: game.Player1Score*5 + (func() int {
 			if winner == p1.Login {
 				return 20
 			}
@@ -459,7 +488,7 @@ func endGame(sala *Sala) {
 		Winner:       winner,
 		FinalScoreP1: game.Player1Score,
 		FinalScoreP2: game.Player2Score,
-		CoinsEarned:  game.Player2Score*5 + (func() int {
+		CoinsEarned: game.Player2Score*5 + (func() int {
 			if winner == p2.Login {
 				return 20
 			}
@@ -477,19 +506,18 @@ func endGame(sala *Sala) {
 	mu.Unlock()
 }
 
-
 // --- LÓGICA DE PACOTES E INSTRUMENTOS ---
 
 func loadInstruments() error {
-    data, err := os.ReadFile(instrumentDataFile)
-    if err != nil {
-        return fmt.Errorf("erro ao ler o arquivo de instrumentos: %v", err)
-    }
-    if err := json.Unmarshal(data, &instrumentDatabase); err != nil {
-        return fmt.Errorf("erro ao decodificar o JSON dos instrumentos: %v", err)
-    }
-    fmt.Printf("Carregados %d instrumentos da base de dados.\n", len(instrumentDatabase))
-    return nil
+	data, err := os.ReadFile(instrumentDataFile)
+	if err != nil {
+		return fmt.Errorf("erro ao ler o arquivo de instrumentos: %v", err)
+	}
+	if err := json.Unmarshal(data, &instrumentDatabase); err != nil {
+		return fmt.Errorf("erro ao decodificar o JSON dos instrumentos: %v", err)
+	}
+	logger.Printf("Carregados %d instrumentos da base de dados.", len(instrumentDatabase))
+	return nil
 }
 
 func GetRandomInstrumentByRarity(rarity string) *protocolo.Instrumento {
@@ -505,20 +533,6 @@ func GetRandomInstrumentByRarity(rarity string) *protocolo.Instrumento {
 	return &filtered[rand.Intn(len(filtered))]
 }
 
-func initializePacketStock() {
-	packetStock = make(map[string]*protocolo.Packet)
-	rarities := []string{"Comum", "Raro", "Épico", "Lendário"}
-	for _, rarity := range rarities {
-		for i := 0; i < 50; i++ {
-			packet := generatePacket(rarity)
-			if packet != nil {
-				packetStock[packet.ID] = packet
-			}
-		}
-	}
-	fmt.Printf("Estoque de pacotes inicializado com %d pacotes.\n", len(packetStock))
-}
-
 func generatePacket(rarity string) *protocolo.Packet {
 	instrument := GetRandomInstrumentByRarity(rarity)
 	if instrument == nil {
@@ -532,33 +546,61 @@ func generatePacket(rarity string) *protocolo.Packet {
 	}
 }
 
+func initializePacketStock() {
+	packetStock = make(map[string]*protocolo.Packet)
+	rarities := []string{"Comum", "Raro", "Épico", "Lendário"}
+	for _, rarity := range rarities {
+		for i := 0; i < 50; i++ {
+			packet := generatePacket(rarity)
+			if packet != nil {
+				packetStock[packet.ID] = packet
+			}
+		}
+	}
+	logger.Printf("Estoque de pacotes inicializado com %d pacotes.", len(packetStock))
+}
+
 func openPacket(player *User) {
+	if raftNode.State() != raft.Leader {
+		leaderAddr := string(raftNode.Leader())
+		sendScreenMsg(player.Conn, fmt.Sprintf("Erro: Ação negada. O servidor líder é %s. Tente novamente.", leaderAddr))
+		logger.Printf(ColorYellow+"Requisição de compra recebida por um não-líder. O líder atual é: %s"+ColorReset, leaderAddr)
+		return
+	}
+
+	cmd := []byte(fmt.Sprintf("COMPRAR_PACOTE:%s", player.Login))
+	future := raftNode.Apply(cmd, 500*time.Millisecond)
+	if err := future.Error(); err != nil {
+		logger.Printf(ColorRed+"Erro ao aplicar comando RAFT: %v"+ColorReset, err)
+		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+		return
+	}
+
+	logger.Printf("Comando de compra para %s foi comitado no cluster RAFT.", player.Login)
+
 	stockMu.Lock()
 	defer stockMu.Unlock()
-
 	if player.Moedas < 20 {
 		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "NO_BALANCE"}})
 		return
 	}
-
 	for id, packet := range packetStock {
 		if !packet.Opened {
 			player.Moedas -= 20
 			packet.Opened = true
-			
 			newInstrument := packet.Instrument
 			player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
-			
 			delete(packetStock, id)
+
 			newPkt := generatePacket(packet.Rarity)
 			if newPkt != nil {
 				packetStock[newPkt.ID] = newPkt
 			}
 
 			resp := protocolo.CompraResponse{
-				Status:        "COMPRA_APROVADA",
+				Status:          "COMPRA_APROVADA",
 				NovoInstrumento: &newInstrument,
-				Inventario:    player.Inventario,
+				Inventario:      player.Inventario,
 			}
 			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: resp})
 			return
@@ -567,7 +609,7 @@ func openPacket(player *User) {
 	sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}})
 }
 
-// --- INTERPRETADOR DE MENSAGENS E MAIN LOOP ---
+// --- INTERPRETADOR E CONEXÃO ---
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
@@ -581,7 +623,7 @@ func handleConnection(conn net.Conn) {
 			if player != nil {
 				player.Online = false
 				player.Conn = nil
-				fmt.Printf("Usuário %s desconectou.\n", player.Login)
+				logger.Printf(ColorYellow+"Usuário %s desconectou."+ColorReset, player.Login)
 			}
 			mu.Unlock()
 			return
@@ -647,55 +689,166 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 	return true
 }
 
+// --- Servidor HTTP para a API REST ---
+func startHttpApi(nodeID string, httpAddr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/join", func(w http.ResponseWriter, r *http.Request) {
+		if raftNode.State() != raft.Leader {
+			http.Error(w, "Not the leader. Try another node.", http.StatusBadRequest)
+			return
+		}
+
+		var reqBody map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "Bad request body", http.StatusBadRequest)
+			return
+		}
+
+		nodeIdToAdd := reqBody["id"]
+		nodeAddrToAdd := reqBody["addr"]
+
+		if nodeIdToAdd == "" || nodeAddrToAdd == "" {
+			http.Error(w, "Missing node ID or address", http.StatusBadRequest)
+			return
+		}
+
+		logger.Printf(ColorCyan+"API REST: Recebido pedido para adicionar o nó %s com endereço %s"+ColorReset, nodeIdToAdd, nodeAddrToAdd)
+
+		future := raftNode.AddVoter(raft.ServerID(nodeIdToAdd), raft.ServerAddress(nodeAddrToAdd), 0, 0)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"Erro ao adicionar nó ao cluster: %v"+ColorReset, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		logger.Printf(ColorGreen+"Nó %s adicionado ao cluster com sucesso!"+ColorReset, nodeIdToAdd)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
+	if err := http.ListenAndServe(httpAddr, mux); err != nil {
+		logger.Fatalf(ColorRed+"Falha ao iniciar servidor HTTP da API: %v"+ColorReset, err)
+	}
+}
+
+// --- FUNÇÃO MAIN ---
 func main() {
+	nodeID := flag.String("id", "", "ID do nó")
+	tcpAddr := flag.String("tcp_addr", ":8080", "Endereço TCP para clientes")
+	raftAddr := flag.String("raft_addr", ":12000", "Endereço para comunicação RAFT")
+	httpAddr := flag.String("http_addr", ":8090", "Endereço para a API REST")
+	joinAddrs := flag.String("join_addrs", "", "Lista de endereços de nós para se juntar")
+	// A flag -bootstrap foi removida para usarmos a lógica dinâmica.
+	flag.Parse()
+
+	if *nodeID == "" {
+		log.Fatal("O ID do nó é obrigatório. Use a flag -id.")
+	}
+
+	logger = log.New(os.Stdout, fmt.Sprintf("[%s] ", *nodeID), log.Ltime|log.Lmicroseconds)
+	logger.Printf(ColorYellow + "Iniciando servidor..." + ColorReset)
+
 	rand.Seed(time.Now().UnixNano())
-	os.Mkdir("data", 0755)
-
-	// --- Conexão MQTT com retentativas e failover ---
-	brokerAddresses := []string{
-		"tcp://broker1:1883",
-		"tcp://broker2:1883",
-		"tcp://broker3:1883",
-	}
-	opts := mqtt.NewClientOptions()
-	for _, addr := range brokerAddresses {
-		opts.AddBroker(addr)
-	}
-	opts.SetClientID("game-server-main")
-	opts.SetAutoReconnect(true)
-	opts.SetConnectRetry(true)
-
-	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-		fmt.Println("Não foi possível conectar a nenhum broker MQTT. Encerrando.")
-		os.Exit(1)
-	}
-	fmt.Println("Conectado ao Broker MQTT com sucesso.")
-	// --- Fim da Conexão MQTT ---
-
+	os.MkdirAll("data", 0755)
 	loadPlayerData()
 	if err := loadInstruments(); err != nil {
-		fmt.Println(err)
-		return
+		logger.Fatal(err)
 	}
 	initializePacketStock()
+
+	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(*nodeID)
+	config.LogLevel = "ERROR"
+
+	raftDataDir := filepath.Join("data", *nodeID)
+	os.MkdirAll(raftDataDir, 0700)
+
+	logStore, err := raftboltdb.NewBoltStore(filepath.Join(raftDataDir, "raft-log.db"))
+	if err != nil {
+		logger.Fatalf("Erro ao criar log store: %s", err)
+	}
+	stableStore, err := raftboltdb.NewBoltStore(filepath.Join(raftDataDir, "raft-stable.db"))
+	if err != nil {
+		logger.Fatalf("Erro ao criar stable store: %s", err)
+	}
+	snapshotStore, err := raft.NewFileSnapshotStore(raftDataDir, 2, os.Stderr)
+	if err != nil {
+		logger.Fatalf("Erro ao criar snapshot store: %s", err)
+	}
+
+	transport, err := raft.NewTCPTransport(*raftAddr, nil, 3, 10*time.Second, os.Stderr)
+	if err != nil {
+		logger.Fatalf("Erro ao criar transport: %s", err)
+	}
+
+	raftNode, err = raft.NewRaft(config, &FSM{}, logStore, stableStore, snapshotStore, transport)
+	if err != nil {
+		logger.Fatalf("Erro ao criar nó RAFT: %s", err)
+	}
+
+	// --- INÍCIO DO BLOCO DE LÓGICA DE CLUSTER CORRIGIDO ---
+	// Tentamos nos juntar a um cluster existente primeiro.
+	// O timeout de 20s na função joinCluster nos dá tempo suficiente.
+	err = joinCluster(*joinAddrs, *nodeID, *raftAddr)
+	if err != nil {
+		logger.Printf(ColorYellow+"AVISO: Não foi possível se juntar a um cluster existente (%v). Verificando se podemos iniciar um novo."+ColorReset, err)
+
+		// Se a tentativa de join falhou, verificamos se o cluster já foi configurado.
+		// Se não tiver servidores, significa que este é um cluster totalmente novo,
+		// então este nó tem permissão para ser o primeiro.
+		configuration := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					ID:      config.LocalID,
+					Address: transport.LocalAddr(),
+				},
+			},
+		}
+		bootstrapFuture := raftNode.BootstrapCluster(configuration)
+		if err := bootstrapFuture.Error(); err != nil {
+			// Se o erro for "cluster already bootstrapped", é normal se outro nó ganhou a corrida.
+			// Qualquer outro erro é fatal.
+			if err != raft.ErrCantBootstrap {
+				logger.Fatalf("Falha ao fazer bootstrap do cluster: %v", err)
+			} else {
+				logger.Println(ColorYellow + "Outro nó iniciou o cluster primeiro. Continuaremos como seguidor." + ColorReset)
+			}
+		} else {
+			logger.Println(ColorGreen + "Nenhum cluster existente encontrado. Bootstrap realizado. Somos o primeiro nó!" + ColorReset)
+		}
+	} else {
+		logger.Printf(ColorGreen + "SUCESSO: Nó se juntou a um cluster existente!" + ColorReset)
+	}
+	// --- FIM DO BLOCO DE LÓGICA DE CLUSTER CORRIGIDO ---
+
+	go startHttpApi(*nodeID, *httpAddr)
+
+	go func() {
+		for leader := range raftNode.LeaderCh() {
+			if leader {
+				logger.Println(ColorGreen + "***********************************" + ColorReset)
+				logger.Println(ColorGreen + "*** EU SOU O LÍDER DO CLUSTER ***" + ColorReset)
+				logger.Println(ColorGreen + "***********************************" + ColorReset)
+			} else {
+				logger.Println(ColorYellow + "--- Liderança perdida, agora sou um seguidor ---" + ColorReset)
+			}
+		}
+	}()
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
 		savePlayerData()
-		mqttClient.Disconnect(250) // Desconecta o cliente MQTT graciosamente
 		os.Exit(0)
 	}()
 
-	listener, err := net.Listen("tcp", ":8080")
+	listener, err := net.Listen("tcp", *tcpAddr)
 	if err != nil {
-		fmt.Println("Erro ao iniciar o servidor:", err)
-		return
+		logger.Fatalf("Erro ao iniciar o servidor TCP: %s", err)
 	}
 	defer listener.Close()
-	fmt.Println("Servidor TCP iniciado na porta 8080. Pressione Ctrl+C para salvar e fechar.")
+	logger.Printf(ColorYellow+"Servidor TCP para clientes iniciado em %s"+ColorReset, *tcpAddr)
 
 	salas = make(map[string]*Sala)
 	salasEmEspera = make([]*Sala, 0)
@@ -708,4 +861,45 @@ func main() {
 		}
 		go handleConnection(conn)
 	}
-} 
+}
+
+// --- FUNÇÃO JOINCLUSTER ---
+func joinCluster(joinAddrs, nodeID, raftAddr string) error {
+	if joinAddrs == "" {
+		// Se nenhum endereço de join for fornecido, não é um erro,
+		// apenas significa que devemos tentar ser o primeiro nó.
+		return fmt.Errorf("nenhum endereço de join fornecido")
+	}
+
+	peerList := strings.Split(joinAddrs, ",")
+
+	// Tenta por um tempo mais curto, para não demorar tanto para decidir ser o líder
+	for i := 0; i < 5; i++ {
+		for _, peer := range peerList {
+			logger.Printf(ColorCyan+"Tentando se juntar ao cluster via nó: %s"+ColorReset, peer)
+			b, err := json.Marshal(map[string]string{"id": nodeID, "addr": raftAddr})
+			if err != nil {
+				continue // Ignora erros de marshal
+			}
+
+			client := http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Post(fmt.Sprintf("http://%s/join", peer), "application/json", bytes.NewReader(b))
+			if err != nil {
+				// Erros de conexão são esperados se os outros nós não subiram ainda
+				// logger.Printf(ColorRed+"Erro ao contatar peer %s: %v"+ColorReset, peer, err)
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				logger.Printf(ColorGreen+"SUCESSO: Juntou-se ao cluster via nó %s!"+ColorReset, peer)
+				return nil // Sucesso!
+			}
+			// Não loga mais falhas para não poluir o terminal
+			// logger.Printf(ColorYellow+"Falha ao se juntar via peer %s. Status: %s"+ColorReset, peer, resp.Status)
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	return fmt.Errorf("não foi possível se juntar ao cluster após várias tentativas")
+}

@@ -1,5 +1,5 @@
 # Usar uma imagem base oficial do Go. A versão 1.18 corresponde ao seu go.mod
-FROM golang:1.18-alpine
+FROM golang:1.24-alpine
 
 # Definir o diretório de trabalho dentro do contêiner
 WORKDIR /app
