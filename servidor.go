@@ -44,7 +44,7 @@ var (
 // --- ESTRUTURAS DE DADOS DO SERVIDOR ---
 
 // Estrutura para encapsular a resposta da FSM
-type fsmApplyResponse struct {
+type fsmApplyResponse struct { // Resposta da FSM pra o servidor dela proprio (tipo confirmacao de que o processo deu certo ou nao)
 	response interface{}
 	err      error
 }
