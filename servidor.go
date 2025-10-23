@@ -43,6 +43,12 @@ var (
 
 // --- ESTRUTURAS DE DADOS DO SERVIDOR ---
 
+// Estrutura para encapsular a resposta da FSM
+type fsmApplyResponse struct {
+	response interface{}
+	err      error
+}
+
 type User struct {
 	Login              string
 	Senha              string
@@ -85,15 +91,106 @@ var (
 	mu                 sync.Mutex
 	mqttClient         mqtt.Client
 	raftNode           *raft.Raft
+	fsmRand            *rand.Rand
 )
 
 // --- RAFT FSM (FINITE STATE MACHINE) ---
 type FSM struct{}
 
 func (f *FSM) Apply(log *raft.Log) interface{} {
-	// logger.Printf("FSM.Apply: aplicando log: %s", string(log.Data))
-	return nil
+	cmd := string(log.Data)
+	// Divide o comando em "TIPO" e "PAYLOAD"
+	// Usamos SplitN com N=2 para garantir que o payload (que pode ser JSON) não seja quebrado
+	parts := strings.SplitN(cmd, ":", 2)
+
+	if len(parts) < 1 {
+		return fsmApplyResponse{err: fmt.Errorf("comando FSM vazio")}
+	}
+
+	cmdType := parts[0]
+	cmdPayload := ""
+	if len(parts) > 1 {
+		cmdPayload = parts[1]
+	}
+
+	// Um switch para lidar com diferentes tipos de comando
+	switch cmdType {
+
+	case "CADASTRAR_JOGADOR":
+		var data protocolo.SignInRequest
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar cadastro")}
+		}
+
+		// Esta é a lógica que estava em cadastrarUser, agora dentro da FSM
+		mu.Lock()
+		defer mu.Unlock()
+
+		if _, exists := players[data.Login]; exists {
+			return fsmApplyResponse{err: fmt.Errorf("Login já existe.")}
+		}
+
+		players[data.Login] = &User{
+			Login:  data.Login,
+			Senha:  data.Senha,
+			Moedas: 100, // Saldo inicial
+		}
+		logger.Printf("[FSM] Jogador %s cadastrado com sucesso.", data.Login)
+		return fsmApplyResponse{response: "OK"} // Sucesso
+
+	case "COMPRAR_PACOTE":
+		playerLogin := cmdPayload // Aqui o payload é só o login
+
+		// --- Início da Lógica de Compra ---
+		mu.Lock() // Bloqueia o mapa de players
+		player, ok := players[playerLogin]
+		if !ok {
+			mu.Unlock()
+			logger.Printf("[FSM] Erro: jogador %s não encontrado.", playerLogin)
+			// Este era o seu erro. Agora ele só acontece se o jogador for deletado.
+			return fsmApplyResponse{err: fmt.Errorf("jogador não encontrado")}
+		}
+		mu.Unlock() // Desbloqueia o mapa de players
+
+		stockMu.Lock() // Bloqueia o estoque
+		defer stockMu.Unlock()
+
+		if player.Moedas < 20 {
+			// A checagem de saldo autoritativa (final)
+			return fsmApplyResponse{response: protocolo.CompraResponse{Status: "NO_BALANCE"}}
+		}
+
+		for id, packet := range packetStock {
+			if !packet.Opened {
+				player.Moedas -= 20
+				packet.Opened = true
+				newInstrument := packet.Instrument
+				player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
+				delete(packetStock, id)
+
+				// Reabastece o estoque
+				newPkt := generatePacket(fsmRand, packet.Rarity) // Usa o fsmRand
+				if newPkt != nil {
+					packetStock[newPkt.ID] = newPkt
+				}
+
+				resp := protocolo.CompraResponse{
+					Status:          "COMPRA_APROVADA",
+					NovoInstrumento: &newInstrument,
+					Inventario:      player.Inventario,
+				}
+				return fsmApplyResponse{response: resp}
+			}
+		}
+		// Se o loop terminar, não havia estoque
+		return fsmApplyResponse{response: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}}
+
+	default:
+		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
+		return fsmApplyResponse{err: fmt.Errorf("comando FSM desconhecido: %s", cmdType)}
+	}
 }
+
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) { return &fsmSnapshot{}, nil }
 func (f *FSM) Restore(rc io.ReadCloser) error      { return nil }
 
@@ -180,18 +277,74 @@ func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 }
 
 func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
-	mu.Lock()
-	defer mu.Unlock()
-	if _, exists := players[data.Login]; exists {
-		sendScreenMsg(conn, "Login já existe.")
-		return
+
+	if raftNode.State() != raft.Leader {
+		// --- LÓGICA DO SEGUIDOR ---
+		leaderRaftAddr := string(raftNode.Leader())
+		if leaderRaftAddr == "" {
+			logger.Printf(ColorRed+"Cadastro de %s negado: líder desconhecido."+ColorReset, data.Login)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "ERRO", Message: "Erro interno: líder indisponível."}})
+			return
+		}
+
+		leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+		logger.Printf(ColorYellow+"Não sou o líder. Encaminhando cadastro de %s para %s"+ColorReset, data.Login, leaderHttpAddr)
+
+		postBody, _ := json.Marshal(data)
+		reqURL := fmt.Sprintf("http://%s/request-register", leaderHttpAddr)
+
+		client := http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(postBody))
+
+		if err != nil {
+			logger.Printf(ColorRed+"Erro ao encaminhar cadastro para o líder: %v"+ColorReset, err)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "ERRO", Message: "Erro ao contatar o servidor líder."}})
+			return
+		}
+		defer resp.Body.Close()
+
+		// Decodifica a resposta (CadastroResponse) vinda do líder
+		var cadastroResp protocolo.CadastroResponse
+		if err := json.NewDecoder(resp.Body).Decode(&cadastroResp); err != nil {
+			logger.Printf(ColorRed+"Erro ao decodificar resposta de cadastro do líder: %v"+ColorReset, err)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "ERRO", Message: "Erro ao ler resposta do líder."}})
+			return
+		}
+
+		// Encaminha a resposta exata do líder para o cliente
+		sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: cadastroResp})
+
+	} else {
+		// --- LÓGICA DO LÍDER ---
+		logger.Printf(ColorGreen+"Sou o líder. Processando cadastro de %s via RAFT."+ColorReset, data.Login)
+
+		cmdPayload, err := json.Marshal(data)
+		if err != nil {
+			logger.Printf(ColorRed+"Erro ao serializar comando de cadastro: %v"+ColorReset, err)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "ERRO", Message: "Erro interno no servidor (serialize)."}})
+			return
+		}
+
+		cmd := []byte("CADASTRAR_JOGADOR:" + string(cmdPayload))
+
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"Erro ao aplicar comando RAFT (cadastro): %v"+ColorReset, err)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "ERRO", Message: "Erro interno no servidor (RAFT)."}})
+			return
+		}
+
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			// Erro de negócio (ex: "Login já existe")
+			logger.Printf(ColorYellow+"Falha no cadastro FSM: %v"+ColorReset, fsmResp.err)
+			sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "LOGIN_EXISTE", Message: fsmResp.err.Error()}})
+			return
+		}
+
+		// Sucesso
+		sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "OK", Message: "Cadastro realizado com sucesso!"}})
 	}
-	players[data.Login] = &User{
-		Login:  data.Login,
-		Senha:  data.Senha,
-		Moedas: 100, // Saldo inicial
-	}
-	sendScreenMsg(conn, "Cadastro realizado com sucesso!")
 }
 
 // --- FUNÇÕES AUXILIARES ---
@@ -520,7 +673,7 @@ func loadInstruments() error {
 	return nil
 }
 
-func GetRandomInstrumentByRarity(rarity string) *protocolo.Instrumento {
+func GetRandomInstrumentByRarity(localRand *rand.Rand, rarity string) *protocolo.Instrumento {
 	var filtered []protocolo.Instrumento
 	for _, inst := range instrumentDatabase {
 		if inst.Rarity == rarity {
@@ -530,11 +683,11 @@ func GetRandomInstrumentByRarity(rarity string) *protocolo.Instrumento {
 	if len(filtered) == 0 {
 		return nil
 	}
-	return &filtered[rand.Intn(len(filtered))]
+	return &filtered[localRand.Intn(len(filtered))] // Usa o rand passado
 }
 
-func generatePacket(rarity string) *protocolo.Packet {
-	instrument := GetRandomInstrumentByRarity(rarity)
+func generatePacket(localRand *rand.Rand, rarity string) *protocolo.Packet {
+	instrument := GetRandomInstrumentByRarity(localRand, rarity)
 	if instrument == nil {
 		return nil
 	}
@@ -547,12 +700,23 @@ func generatePacket(rarity string) *protocolo.Packet {
 }
 
 func initializePacketStock() {
+	// Cria um gerador de números aleatórios com uma semente FIXA.
+	// Isso garante que TODOS os servidores gerem o MESMO estoque inicial.
+	localRand := rand.New(rand.NewSource(12345)) // Semente fixa
+
 	packetStock = make(map[string]*protocolo.Packet)
 	rarities := []string{"Comum", "Raro", "Épico", "Lendário"}
 	for _, rarity := range rarities {
 		for i := 0; i < 50; i++ {
-			packet := generatePacket(rarity)
-			if packet != nil {
+			// GetRandomInstrumentByRarity precisa ser modificado para aceitar o localRand
+			instrument := GetRandomInstrumentByRarity(localRand, rarity) // Passa o rand
+			if instrument != nil {
+				packet := &protocolo.Packet{
+					ID:         randomGenerate(4), // Este rand não afeta o estado
+					Rarity:     rarity,
+					Instrument: *instrument,
+					Opened:     false,
+				}
 				packetStock[packet.ID] = packet
 			}
 		}
@@ -561,52 +725,95 @@ func initializePacketStock() {
 }
 
 func openPacket(player *User) {
-	if raftNode.State() != raft.Leader {
-		leaderAddr := string(raftNode.Leader())
-		sendScreenMsg(player.Conn, fmt.Sprintf("Erro: Ação negada. O servidor líder é %s. Tente novamente.", leaderAddr))
-		logger.Printf(ColorYellow+"Requisição de compra recebida por um não-líder. O líder atual é: %s"+ColorReset, leaderAddr)
-		return
-	}
 
-	cmd := []byte(fmt.Sprintf("COMPRAR_PACOTE:%s", player.Login))
-	future := raftNode.Apply(cmd, 500*time.Millisecond)
-	if err := future.Error(); err != nil {
-		logger.Printf(ColorRed+"Erro ao aplicar comando RAFT: %v"+ColorReset, err)
-		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
-		return
-	}
-
-	logger.Printf("Comando de compra para %s foi comitado no cluster RAFT.", player.Login)
-
-	stockMu.Lock()
-	defer stockMu.Unlock()
 	if player.Moedas < 20 {
+		logger.Printf(ColorYellow+"Pedido de compra de %s negado localmente: saldo insuficiente (%d moedas)."+ColorReset, player.Login, player.Moedas)
 		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "NO_BALANCE"}})
-		return
+		return // Encerra a função aqui
 	}
-	for id, packet := range packetStock {
-		if !packet.Opened {
-			player.Moedas -= 20
-			packet.Opened = true
-			newInstrument := packet.Instrument
-			player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
-			delete(packetStock, id)
 
-			newPkt := generatePacket(packet.Rarity)
-			if newPkt != nil {
-				packetStock[newPkt.ID] = newPkt
-			}
+	if raftNode.State() != raft.Leader {
+		// --- LÓGICA DO SEGUIDOR ---
+		// Não somos o líder. Devemos encaminhar para o líder via HTTP REST.
 
-			resp := protocolo.CompraResponse{
-				Status:          "COMPRA_APROVADA",
-				NovoInstrumento: &newInstrument,
-				Inventario:      player.Inventario,
-			}
-			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: resp})
+		// 1. Descobrir o endereço HTTP do líder
+		// Seu docker-compose usa `servidor1:12000` (RAFT) e `servidor1:8090` (HTTP)
+		// Vamos assumir essa convenção de portas (trocar 12000 por 8090)
+		leaderRaftAddr := string(raftNode.Leader())
+		if leaderRaftAddr == "" {
+			logger.Printf(ColorRed + "Pedido de compra falhou: líder desconhecido." + ColorReset)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
 			return
 		}
+
+		// IMPORTANTE: Isso assume que a porta HTTP está em :8090 e a RAFT em :12000
+		// E que ambos usam o mesmo hostname (ex: "servidor1")
+		leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+
+		logger.Printf(ColorYellow+"Não sou o líder. Encaminhando pedido de compra de %s para %s"+ColorReset, player.Login, leaderHttpAddr)
+
+		// 2. Preparar a requisição HTTP
+		postBody, _ := json.Marshal(map[string]string{
+			"playerLogin": player.Login,
+		})
+		reqURL := fmt.Sprintf("http://%s/request-purchase", leaderHttpAddr)
+
+		client := http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(postBody))
+
+		// 3. Lidar com a resposta do líder
+		if err != nil {
+			logger.Printf(ColorRed+"Erro ao encaminhar pedido para o líder: %v"+ColorReset, err)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			logger.Printf(ColorRed+"Líder retornou erro: %s"+ColorReset, resp.Status)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+			return
+		}
+
+		// 4. Decodificar a resposta (CompraResponse) e enviar ao cliente
+		var compraResp protocolo.CompraResponse
+		if err := json.NewDecoder(resp.Body).Decode(&compraResp); err != nil {
+			logger.Printf(ColorRed+"Erro ao decodificar resposta do líder: %v"+ColorReset, err)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+			return
+		}
+
+		// Sucesso! Envia a resposta do líder diretamente para o cliente.
+		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: compraResp})
+
+		// Nota: O estado local do seguidor será atualizado em breve,
+		// quando o FSM.Apply for executado com o comando vindo do líder.
+
+	} else {
+		// --- LÓGICA DO LÍDER ---
+		// Somos o líder. Aplicamos o comando no RAFT.
+		logger.Printf(ColorGreen+"Sou o líder. Processando pedido de compra de %s via RAFT."+ColorReset, player.Login)
+
+		cmd := []byte(fmt.Sprintf("COMPRAR_PACOTE:%s", player.Login))
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"Erro ao aplicar comando RAFT: %v"+ColorReset, err)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+			return
+		}
+
+		// Pega a resposta que a *nossa própria FSM* retornou
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			// Isso não deveria acontecer se o comando estiver correto
+			logger.Printf(ColorRed+"Erro na FSM: %v"+ColorReset, fsmResp.err)
+			sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "RAFT_ERROR"}})
+			return
+		}
+
+		// Envia a resposta da FSM (CompraResponse) para o cliente
+		sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: fsmResp.response})
 	}
-	sendJSON(player.Conn, protocolo.Message{Type: "COMPRA_RESPONSE", Data: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}})
 }
 
 // --- INTERPRETADOR E CONEXÃO ---
@@ -682,6 +889,13 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 	case "PLAY_NOTE":
 		handlePlayNote(conn, msg.Data)
 	case "QUIT":
+		if player != nil {
+			mu.Lock()
+			player.Online = false
+			player.Conn = nil // Limpa a referência da conexão
+			logger.Printf(ColorYellow+"Usuário %s desconectou (QUIT)."+ColorReset, player.Login)
+			mu.Unlock()
+		}
 		return false
 	default:
 		sendScreenMsg(conn, "Comando inválido.")
@@ -725,6 +939,93 @@ func startHttpApi(nodeID string, httpAddr string) {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	mux.HandleFunc("/request-purchase", func(w http.ResponseWriter, r *http.Request) {
+		// Este endpoint SÓ deve ser chamado no LÍDER
+		if raftNode.State() != raft.Leader {
+			http.Error(w, "Não sou o líder. Encaminhe para "+string(raftNode.Leader()), http.StatusServiceUnavailable)
+			return
+		}
+
+		// Decodifica o login do jogador vindo do seguidor
+		var reqBody map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "Corpo da requisição inválido", http.StatusBadRequest)
+			return
+		}
+		playerLogin := reqBody["playerLogin"]
+		if playerLogin == "" {
+			http.Error(w, "Missing playerLogin", http.StatusBadRequest)
+			return
+		}
+
+		logger.Printf(ColorCyan+"[API REST] Recebido pedido de compra do jogador %s (encaminhado por um seguidor)"+ColorReset, playerLogin)
+
+		// Aplica o comando no RAFT (exatamente como o líder faria)
+		cmd := []byte(fmt.Sprintf("COMPRAR_PACOTE:%s", playerLogin))
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"[API REST] Erro ao aplicar comando RAFT: %v"+ColorReset, err)
+			http.Error(w, "Erro no RAFT", http.StatusInternalServerError)
+			return
+		}
+
+		// Pega a resposta da FSM
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			logger.Printf(ColorRed+"[API REST] Erro na FSM: %v"+ColorReset, fsmResp.err)
+			http.Error(w, "Erro na FSM", http.StatusInternalServerError)
+			return
+		}
+
+		// Envia a CompraResponse (em JSON) de volta para o servidor seguidor
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(fsmResp.response)
+	})
+
+	mux.HandleFunc("/request-register", func(w http.ResponseWriter, r *http.Request) {
+		if raftNode.State() != raft.Leader {
+			http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable)
+			return
+		}
+
+		var reqBody protocolo.SignInRequest
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "Corpo da requisição inválido", http.StatusBadRequest)
+			return
+		}
+
+		logger.Printf(ColorCyan+"[API REST] Recebido pedido de cadastro para %s (encaminhado por um seguidor)"+ColorReset, reqBody.Login)
+
+		cmdPayload, _ := json.Marshal(reqBody)
+		cmd := []byte("CADASTRAR_JOGADOR:" + string(cmdPayload))
+
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"[API REST] Erro ao aplicar comando RAFT (cadastro): %v"+ColorReset, err)
+			resp := protocolo.CadastroResponse{Status: "ERRO", Message: "Erro interno no servidor (RAFT)."}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		fsmResp := future.Response().(fsmApplyResponse)
+		w.Header().Set("Content-Type", "application/json")
+		if fsmResp.err != nil {
+			// Erro de negócio (ex: "Login já existe")
+			logger.Printf(ColorRed+"[API REST] Falha no cadastro FSM: %v"+ColorReset, fsmResp.err)
+			resp := protocolo.CadastroResponse{Status: "LOGIN_EXISTE", Message: fsmResp.err.Error()}
+			w.WriteHeader(http.StatusBadRequest) // Envia o erro como resposta HTTP
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Sucesso
+		resp := protocolo.CadastroResponse{Status: "OK", Message: "Cadastro realizado com sucesso!"}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		logger.Fatalf(ColorRed+"Falha ao iniciar servidor HTTP da API: %v"+ColorReset, err)
@@ -749,6 +1050,8 @@ func main() {
 	logger.Printf(ColorYellow + "Iniciando servidor..." + ColorReset)
 
 	rand.Seed(time.Now().UnixNano())
+	fsmRand = rand.New(rand.NewSource(12345))
+
 	os.MkdirAll("data", 0755)
 	loadPlayerData()
 	if err := loadInstruments(); err != nil {

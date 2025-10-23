@@ -374,6 +374,14 @@ ReconnectLoop:
 						fmt.Println("Login falhou: Senha incorreta ou erro desconhecido.")
 						currentState = LoginState
 					}
+				case "CADASTRO_RESPONSE":
+					var data protocolo.CadastroResponse
+					mapToStruct(msg.Data, &data)
+					// Imprime a mensagem vinda do servidor (seja sucesso ou erro)
+					fmt.Println("\n[SERVIDOR]: " + data.Message)
+					// Retorna ao estado de Login para que o usuário possa logar
+					currentState = LoginState
+
 				case "PAREADO":
 					var data protocolo.PairingMessage
 					mapToStruct(msg.Data, &data)
@@ -449,6 +457,8 @@ ReconnectLoop:
 						senha := readLine(userInputReader)
 						if err := sendJSON(writer, protocolo.Message{Type: "CADASTRO", Data: protocolo.SignInRequest{Login: login, Senha: senha}}); err != nil {
 							fmt.Printf("[ERRO] Falha ao enviar cadastro: %v\n", err)
+						} else {
+							currentState = StopState
 						}
 						// Continua no LoginState após tentar cadastrar
 					} else if choice == "0" {

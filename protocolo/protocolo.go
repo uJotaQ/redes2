@@ -15,9 +15,9 @@ type Attack struct {
 }
 
 type Instrumento struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Rarity  string   `json:"rarity"`
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
+	Rarity  string    `json:"rarity"`
 	Attacks [3]Attack `json:"attacks"`
 }
 
@@ -46,6 +46,11 @@ type LoginResponse struct {
 type SignInRequest struct {
 	Login string `json:"login"`
 	Senha string `json:"senha"`
+}
+
+type CadastroResponse struct {
+	Status  string `json:"status"` // "OK", "LOGIN_EXISTE", "ERRO"
+	Message string `json:"message"`
 }
 
 // Mensagens de tela e chat
