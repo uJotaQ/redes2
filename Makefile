@@ -8,7 +8,17 @@
 
 # Sobe todo o ambiente (3 servidores + 1 broker)
 up:
-	docker compose up --build -d broker1 servidor1 servidor2 servidor3
+	@echo "Subindo broker e servidor1 (líder inicial)..."
+	docker compose up --build -d broker1 servidor1
+	@echo "Aguardando 0.5 segundos para o servidor1 se estabilizar..."
+	@sleep 0.1
+	@echo "Subindo servidor2 (seguidor)..."
+	docker compose up --build -d servidor2
+	@echo "Aguardando 0.5 segundos..."
+	@sleep 0.1
+	@echo "Subindo servidor3 (seguidor)..."
+	docker compose up --build -d servidor3
+	@echo "Cluster completo!"
 
 # Para e remove todos os contêineres
 down:

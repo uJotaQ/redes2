@@ -423,37 +423,6 @@
           ]
         },
         {
-          "id": "HARP_001",
-          "name": "Harpa",
-          "rarity": "Lendário",
-          "attacks": [
-            {
-              "name": "Arpejo Celestial",
-              "sequence": [
-                "C",
-                "F",
-                "A"
-              ]
-            },
-            {
-              "name": "Glissando Suave",
-              "sequence": [
-                "D",
-                "G",
-                "B"
-              ]
-            },
-            {
-              "name": "Eco Etéreo",
-              "sequence": [
-                "E",
-                "A",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
           "id": "FLUTE_001",
           "name": "Flauta",
           "rarity": "Comum",
@@ -479,37 +448,6 @@
               "sequence": [
                 "A",
                 "B",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
-          "id": "HARP_001",
-          "name": "Harpa",
-          "rarity": "Lendário",
-          "attacks": [
-            {
-              "name": "Arpejo Celestial",
-              "sequence": [
-                "C",
-                "F",
-                "A"
-              ]
-            },
-            {
-              "name": "Glissando Suave",
-              "sequence": [
-                "D",
-                "G",
-                "B"
-              ]
-            },
-            {
-              "name": "Eco Etéreo",
-              "sequence": [
-                "E",
-                "A",
                 "C"
               ]
             }
@@ -640,37 +578,6 @@
           ]
         },
         {
-          "id": "HARP_001",
-          "name": "Harpa",
-          "rarity": "Lendário",
-          "attacks": [
-            {
-              "name": "Arpejo Celestial",
-              "sequence": [
-                "C",
-                "F",
-                "A"
-              ]
-            },
-            {
-              "name": "Glissando Suave",
-              "sequence": [
-                "D",
-                "G",
-                "B"
-              ]
-            },
-            {
-              "name": "Eco Etéreo",
-              "sequence": [
-                "E",
-                "A",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
           "id": "FLUTE_001",
           "name": "Flauta",
           "rarity": "Comum",
@@ -696,37 +603,6 @@
               "sequence": [
                 "A",
                 "B",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
-          "id": "BANJO_001",
-          "name": "Banjo",
-          "rarity": "Comum",
-          "attacks": [
-            {
-              "name": "Dedilhado",
-              "sequence": [
-                "C",
-                "G",
-                "B"
-              ]
-            },
-            {
-              "name": "Rasgueado",
-              "sequence": [
-                "D",
-                "A",
-                "E"
-              ]
-            },
-            {
-              "name": "Bluegrass",
-              "sequence": [
-                "F",
-                "G",
                 "C"
               ]
             }
@@ -979,6 +855,130 @@
               ]
             }
           ]
+        },
+        {
+          "id": "VIOLIN_001",
+          "name": "Violino",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Vibrato",
+              "sequence": [
+                "A",
+                "B",
+                "G"
+              ]
+            },
+            {
+              "name": "Pizzicato",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Spiccato",
+              "sequence": [
+                "F",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Trinado",
+              "sequence": [
+                "C",
+                "D",
+                "E"
+              ]
+            },
+            {
+              "name": "Sopro Forte",
+              "sequence": [
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
+                "A",
+                "B",
+                "C"
+              ]
+            }
+          ]
         }
       ]
     },
@@ -1028,6 +1028,342 @@
     "Latencia": 0,
     "SelectedInstrument": null
   },
+  "Novo1": {
+    "Login": "Novo1",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
+          "attacks": [
+            {
+              "name": "Arpejo Celestial",
+              "sequence": [
+                "C",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Glissando Suave",
+              "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "VIOLIN_001",
+          "name": "Violino",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Vibrato",
+              "sequence": [
+                "A",
+                "B",
+                "G"
+              ]
+            },
+            {
+              "name": "Pizzicato",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Spiccato",
+              "sequence": [
+                "F",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "GUITAR_001",
+          "name": "Guitarra",
+          "rarity": "Épico",
+          "attacks": [
+            {
+              "name": "Power Chord",
+              "sequence": [
+                "E",
+                "A",
+                "D"
+              ]
+            },
+            {
+              "name": "Solo Rápido",
+              "sequence": [
+                "G",
+                "B",
+                "E"
+              ]
+            },
+            {
+              "name": "Palm Mute",
+              "sequence": [
+                "E",
+                "E",
+                "A"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "UKULE_001",
+          "name": "Ukulele",
+          "rarity": "Comum",
+          "attacks": [
+            {
+              "name": "Acorde Leve",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Ritmo Havaiano",
+              "sequence": [
+                "D",
+                "G",
+                "A"
+              ]
+            },
+            {
+              "name": "Ponte Alegre",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "TRUMPET_001",
+          "name": "Trompete",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Susto Sonoro",
+              "sequence": [
+                "C",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Escalada",
+              "sequence": [
+                "D",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Sopro Metálico",
+              "sequence": [
+                "E",
+                "A",
+                "B"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 0,
+    "Latencia": 0,
+    "SelectedInstrument": null
+  },
+  "Novo2": {
+    "Login": "Novo2",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
+          "attacks": [
+            {
+              "name": "Arpejo Celestial",
+              "sequence": [
+                "C",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Glissando Suave",
+              "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "VIOLIN_001",
+          "name": "Violino",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Vibrato",
+              "sequence": [
+                "A",
+                "B",
+                "G"
+              ]
+            },
+            {
+              "name": "Pizzicato",
+              "sequence": [
+                "C",
+                "E",
+                "G"
+              ]
+            },
+            {
+              "name": "Spiccato",
+              "sequence": [
+                "F",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "TRUMPET_001",
+          "name": "Trompete",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Susto Sonoro",
+              "sequence": [
+                "C",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Escalada",
+              "sequence": [
+                "D",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Sopro Metálico",
+              "sequence": [
+                "E",
+                "A",
+                "B"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "GUITAR_001",
+          "name": "Guitarra",
+          "rarity": "Épico",
+          "attacks": [
+            {
+              "name": "Power Chord",
+              "sequence": [
+                "E",
+                "A",
+                "D"
+              ]
+            },
+            {
+              "name": "Solo Rápido",
+              "sequence": [
+                "G",
+                "B",
+                "E"
+              ]
+            },
+            {
+              "name": "Palm Mute",
+              "sequence": [
+                "E",
+                "E",
+                "A"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "TRUMPET_001",
+          "name": "Trompete",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Susto Sonoro",
+              "sequence": [
+                "C",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Escalada",
+              "sequence": [
+                "D",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Sopro Metálico",
+              "sequence": [
+                "E",
+                "A",
+                "B"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 0,
+    "Latencia": 0,
+    "SelectedInstrument": null
+  },
   "Sa": {
     "Login": "Sa",
     "Senha": "123",
@@ -1036,68 +1372,6 @@
     "Inventario": {
       "instrumentos": [
         {
-          "id": "FLUTE_001",
-          "name": "Flauta",
-          "rarity": "Comum",
-          "attacks": [
-            {
-              "name": "Trinado",
-              "sequence": [
-                "C",
-                "D",
-                "E"
-              ]
-            },
-            {
-              "name": "Sopro Forte",
-              "sequence": [
-                "F",
-                "G",
-                "C"
-              ]
-            },
-            {
-              "name": "Melodia Doce",
-              "sequence": [
-                "A",
-                "B",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
-          "id": "FLUTE_001",
-          "name": "Flauta",
-          "rarity": "Comum",
-          "attacks": [
-            {
-              "name": "Trinado",
-              "sequence": [
-                "C",
-                "D",
-                "E"
-              ]
-            },
-            {
-              "name": "Sopro Forte",
-              "sequence": [
-                "F",
-                "G",
-                "C"
-              ]
-            },
-            {
-              "name": "Melodia Doce",
-              "sequence": [
-                "A",
-                "B",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
           "id": "VIOLIN_001",
           "name": "Violino",
           "rarity": "Raro",
@@ -1129,61 +1403,123 @@
           ]
         },
         {
-          "id": "FLUTE_001",
-          "name": "Flauta",
+          "id": "BANJO_001",
+          "name": "Banjo",
           "rarity": "Comum",
           "attacks": [
             {
-              "name": "Trinado",
+              "name": "Dedilhado",
               "sequence": [
                 "C",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Rasgueado",
+              "sequence": [
                 "D",
+                "A",
                 "E"
               ]
             },
             {
-              "name": "Sopro Forte",
+              "name": "Bluegrass",
               "sequence": [
                 "F",
                 "G",
-                "C"
-              ]
-            },
-            {
-              "name": "Melodia Doce",
-              "sequence": [
-                "A",
-                "B",
                 "C"
               ]
             }
           ]
         },
         {
-          "id": "VIOLIN_001",
-          "name": "Violino",
-          "rarity": "Raro",
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
           "attacks": [
             {
-              "name": "Vibrato",
-              "sequence": [
-                "A",
-                "B",
-                "G"
-              ]
-            },
-            {
-              "name": "Pizzicato",
+              "name": "Arpejo Celestial",
               "sequence": [
                 "C",
-                "E",
-                "G"
+                "F",
+                "A"
               ]
             },
             {
-              "name": "Spiccato",
+              "name": "Glissando Suave",
               "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
+          "attacks": [
+            {
+              "name": "Arpejo Celestial",
+              "sequence": [
+                "C",
                 "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Glissando Suave",
+              "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
+          "attacks": [
+            {
+              "name": "Arpejo Celestial",
+              "sequence": [
+                "C",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Glissando Suave",
+              "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
                 "A",
                 "C"
               ]

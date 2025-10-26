@@ -132,3 +132,25 @@ type GameOverMessage struct {
 	FinalScoreP2 int    `json:"final_score_p2"`
 	CoinsEarned  int    `json:"coins_earned"`
 }
+
+// Estruturas para Troca de Instrumentos
+type TradeRequest struct {
+	InstrumentIndex int    `json:"instrumento_id"` // TA MANDANDO O INDICE DO INSTRUMENTO
+	Player2Login    string `json:"player2_login"`
+}
+
+type TradeResponse struct {
+    Status          string       `json:"status"` // "OFFER_SENT", "TRADE_COMPLETED", "ERRO"
+    Message         string       `json:"message"`
+    Inventario      Inventario   `json:"inventario,omitempty"` // Seu inventário atualizado APÓS a troca
+    ReceivedCard    *Instrumento `json:"received_card,omitempty"` // A carta que VOCÊ recebeu
+    OtherPlayerLogin string      `json:"other_player_login,omitempty"` // Com quem você trocou
+}
+
+// Estrutura para pedir atualização do inventário
+type GetInventoryRequest struct{} // Não precisa de campos
+
+// Estrutura para enviar o inventário atualizado
+type InventoryResponse struct {
+	Inventario Inventario `json:"inventario"`
+}

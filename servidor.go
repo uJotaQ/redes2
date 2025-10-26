@@ -49,6 +49,13 @@ type fsmApplyResponse struct { // Resposta da FSM pra o servidor dela proprio (t
 	err      error
 }
 
+type FsmTradeCompletionResult struct {
+	P1Login       string                   
+    P2Login       string
+	ResponseForP1 *protocolo.TradeResponse // Resposta formatada para o Player 1 original
+	ResponseForP2 *protocolo.TradeResponse // Resposta formatada para o Player 2 que completou
+}
+
 type User struct {
 	Login              string
 	Senha              string
@@ -78,6 +85,14 @@ type Sala struct {
 	Game      *GameState
 }
 
+// Struct para armazenar ofertas de troca pendentes
+type TradeOffer struct {
+	Player1     string
+	Player2     string
+	CardPlayer1 protocolo.Instrumento
+	Finished    bool // Talvez remover isso dps
+}
+
 // --- VARIÁVEIS GLOBAIS ---
 
 var (
@@ -92,6 +107,12 @@ var (
 	mqttClient         mqtt.Client
 	raftNode           *raft.Raft
 	fsmRand            *rand.Rand
+
+	tradeMu      sync.Mutex
+
+	transport    *raft.NetworkTransport
+
+	activeTrades map[string]*TradeOffer
 )
 
 // --- RAFT FSM (FINITE STATE MACHINE) ---
@@ -184,6 +205,131 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		// Se o loop terminar, não havia estoque
 		return fsmApplyResponse{response: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}}
+		
+	case "PROPOSE_TRADE":
+        // O payload aqui é um JSON de uma struct interna que definimos
+        var req struct {
+            Player1Login string
+            Player2Login string
+            CardPlayer1  protocolo.Instrumento
+        }
+        if err := json.Unmarshal([]byte(cmdPayload), &req); err != nil {
+            return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar troca")}
+        }
+
+        // 1. Travar ambos os mapas
+        mu.Lock()
+        tradeMu.Lock()
+        defer mu.Unlock()
+        defer tradeMu.Unlock()
+
+        // 2. Validações (feitas aqui dentro da FSM para garantir consistência)
+        if req.Player1Login == req.Player2Login {
+            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não pode trocar cartas consigo mesmo."}}
+        }
+
+        player1, ok1 := players[req.Player1Login]
+        player2, ok2 := players[req.Player2Login]
+        if !ok1 || !ok2 {
+            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Jogador não encontrado."}}
+        }
+
+        // 3. Verificar se o P1 realmente tem a carta
+        cardIndexP1 := -1
+        for i, card := range player1.Inventario.Instrumentos {
+            if card.ID == req.CardPlayer1.ID { // Compara por ID
+                cardIndexP1 = i
+                break
+            }
+        }
+        if cardIndexP1 == -1 {
+            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não possui mais esta carta."}}
+        }
+
+        // 4. Lógica de "Mão Dupla"
+        reverseTradeKey := req.Player2Login + ":" + req.Player1Login
+        reverseOffer, exists := activeTrades[reverseTradeKey]
+
+        if exists {
+            // --- TROCA COMPLETA ---
+            // A outra parte (P2) já ofereceu. Vamos completar a troca.
+            
+            // A. Pegar a carta do P2 da oferta existente
+            cardP2 := reverseOffer.CardPlayer1 // P1 da oferta reversa é o P2
+            
+            // B. Verificar se P2 ainda tem a carta
+            cardIndexP2 := -1
+            for i, card := range player2.Inventario.Instrumentos {
+                if card.ID == cardP2.ID {
+                    cardIndexP2 = i
+                    break
+                }
+            }
+            if cardIndexP2 == -1 {
+                // P2 não tem mais a carta. A oferta dele é inválida.
+                delete(activeTrades, reverseTradeKey) // Remove a oferta inválida
+                return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "O outro jogador não possui mais a carta oferecida. A oferta dele foi cancelada."}}
+            }
+
+            // C. Remover as cartas dos inventários
+            // (Remover P1)
+            cardP1 := player1.Inventario.Instrumentos[cardIndexP1]
+            player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos[:cardIndexP1], player1.Inventario.Instrumentos[cardIndexP1+1:]...)
+            // (Remover P2)
+            player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos[:cardIndexP2], player2.Inventario.Instrumentos[cardIndexP2+1:]...)
+
+            // D. Adicionar as cartas trocadas
+            player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos, cardP2)
+            player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos, cardP1)
+            
+            // E. Limpar a oferta
+            delete(activeTrades, reverseTradeKey)
+
+			respP1 := protocolo.TradeResponse{
+                Status:          "TRADE_COMPLETED",
+                Message:         fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player2.Login, cardP2.Name),
+                Inventario:      player1.Inventario, // Inventário final do P1
+                ReceivedCard:    &cardP2,           // Carta que P1 recebeu
+                OtherPlayerLogin: player2.Login,    // Quem P1 trocou
+            }
+            respP2 := protocolo.TradeResponse{
+                Status:          "TRADE_COMPLETED",
+                Message:         fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player1.Login, cardP1.Name),
+                Inventario:      player2.Inventario, // Inventário final do P2
+                ReceivedCard:    &cardP1,           // Carta que P2 recebeu
+                OtherPlayerLogin: player1.Login,    // Quem P2 trocou
+            }
+
+            logger.Printf("[FSM] Troca concluída entre %s e %s.", player1.Login, player2.Login)
+
+            // Retorna ambas as respostas, empacotadas na nova struct
+            return fsmApplyResponse{response: FsmTradeCompletionResult{
+                ResponseForP1: &respP1,
+                ResponseForP2: &respP2,
+            }}
+
+        } else {
+            // --- NOVA OFERTA DE TROCA ---
+            tradeKey := req.Player1Login + ":" + req.Player2Login
+            if _, exists := activeTrades[tradeKey]; exists {
+                return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você já tem uma oferta pendente para este jogador."}}
+            }
+            
+            // Criar e salvar a nova oferta
+            activeTrades[tradeKey] = &TradeOffer{
+                Player1:     req.Player1Login,
+                Player2:     req.Player2Login,
+                CardPlayer1: req.CardPlayer1,
+                Finished:    false,
+            }
+            
+            logger.Printf("[FSM] Nova oferta de troca registrada de %s para %s.", req.Player1Login, req.Player2Login)
+            
+            return fsmApplyResponse{response: protocolo.TradeResponse{
+                Status:  "OFFER_SENT",
+                Message: fmt.Sprintf("Oferta de troca enviada para %s.", req.Player2Login),
+            }}
+        }
 
 	default:
 		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
@@ -275,6 +421,7 @@ func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	}
 	sendJSON(conn, msg)
 }
+
 
 func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 
@@ -816,6 +963,178 @@ func openPacket(player *User) {
 	}
 }
 
+func proposeTrade(player *User, data interface{}) {
+    var req protocolo.TradeRequest
+    if err := mapToStruct(data, &req); err != nil {
+        sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Requisição inválida."}})
+        return
+    }
+
+    // Validação local: O índice da carta é válido?
+    if req.InstrumentIndex < 0 || req.InstrumentIndex >= len(player.Inventario.Instrumentos) {
+        sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Seleção de instrumento inválida."}})
+        return
+    }
+    // Pega a carta que o P1 quer trocar
+    cardToTrade := player.Inventario.Instrumentos[req.InstrumentIndex]
+
+    // Prepara o payload interno para o RAFT
+    // A FSM receberá este payload, não o 'protocolo.TradeRequest'
+    internalPayload := map[string]interface{}{
+        "Player1Login": player.Login,
+        "Player2Login": req.Player2Login,
+        "CardPlayer1":  cardToTrade,
+    }
+
+    if raftNode.State() != raft.Leader {
+        // --- LÓGICA DO SEGUIDOR ---
+        leaderRaftAddr := string(raftNode.Leader())
+        if leaderRaftAddr == "" {
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Erro interno: líder indisponível."}})
+            return
+        }
+
+        leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+        logger.Printf(ColorYellow+"Não sou o líder. Encaminhando proposta de troca de %s para %s"+ColorReset, player.Login, leaderHttpAddr)
+
+        postBody, _ := json.Marshal(internalPayload) // Envia o payload interno
+        reqURL := fmt.Sprintf("http://%s/request-trade", leaderHttpAddr)
+
+        client := http.Client{Timeout: 3 * time.Second}
+        resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(postBody))
+
+        if err != nil {
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Erro ao contatar o servidor líder."}})
+            return
+        }
+        defer resp.Body.Close()
+
+        var tradeResp protocolo.TradeResponse
+        if err := json.NewDecoder(resp.Body).Decode(&tradeResp); err != nil {
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Erro ao ler resposta do líder."}})
+            return
+        }
+
+        // Se a troca foi completa, o inventário local do SEGUIDOR está
+        // desatualizado. A FSM vai atualizar, mas a resposta imediata
+        // do líder já contém o inventário correto.
+        if tradeResp.Status == "TRADE_COMPLETED" {
+             player.Inventario = tradeResp.Inventario
+        }
+        sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: tradeResp})
+
+    } else {
+        // --- LÓGICA DO LÍDER ---
+        logger.Printf(ColorGreen+"Sou o líder. Processando proposta de troca de %s via RAFT."+ColorReset, player.Login)
+
+        cmdPayload, _ := json.Marshal(internalPayload)
+        cmd := []byte("PROPOSE_TRADE:" + string(cmdPayload))
+
+        future := raftNode.Apply(cmd, 500*time.Millisecond)
+        if err := future.Error(); err != nil {
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Erro interno no servidor (RAFT)."}})
+            return
+        }
+
+        fsmResp := future.Response().(fsmApplyResponse)
+        if fsmResp.err != nil {
+             // Erro da FSM (ex: falha ao decodificar)
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: fsmResp.err.Error()}})
+            return
+        }
+
+        // --- MUDANÇA AQUI: Verifica o tipo de resposta da FSM ---
+        switch result := fsmResp.response.(type) {
+        case protocolo.TradeResponse: // Caso: Oferta enviada ou Erro único
+            tradeResp := result
+            // Envia a resposta normal para o iniciador
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: tradeResp})
+
+        case FsmTradeCompletionResult: // Caso: Troca foi completada!
+            completionResult := result
+
+            // Descobre qual resposta é para quem
+            var responseForCaller *protocolo.TradeResponse // Quem chamou esta função (ex: Sa)
+            var responseForOther *protocolo.TradeResponse  // O outro jogador (ex: Leo)
+            var otherPlayerLogin string
+
+            // 'player' aqui é quem iniciou ESTE comando PROPOSE_TRADE
+            // Verifica usando os logins retornados pela FSM
+            if player.Login == completionResult.P2Login { // player é P2?
+                responseForCaller = completionResult.ResponseForP2
+                responseForOther = completionResult.ResponseForP1
+                otherPlayerLogin = completionResult.P1Login
+            } else { // player é P1?
+                responseForCaller = completionResult.ResponseForP1
+                responseForOther = completionResult.ResponseForP2
+                otherPlayerLogin = completionResult.P2Login
+            }
+
+            // Atualiza o inventário local do CHAMADOR (quem iniciou este comando)
+            player.Inventario = responseForCaller.Inventario
+            // Envia a resposta para o CHAMADOR
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: *responseForCaller})
+
+            // --- CORREÇÃO: Faz BROADCAST para notificar o OUTRO jogador ---
+            messageForOther := protocolo.Message{Type: "TRADE_RESPONSE", Data: *responseForOther}
+            broadcastNotificationToPlayer(otherPlayerLogin, messageForOther)
+            // --- FIM DA CORREÇÃO ---
+
+        default:
+             // Erro inesperado
+            sendJSON(player.Conn, protocolo.Message{Type: "TRADE_RESPONSE", Data: protocolo.TradeResponse{Status: "ERRO", Message: "Resposta interna do servidor inválida."}})
+        }
+	}
+}
+
+// broadcastNotificationToPlayer envia uma notificação para todos os outros nós do cluster.
+func broadcastNotificationToPlayer(targetLogin string, messageToSend protocolo.Message) {
+    if raftNode.State() != raft.Leader {
+        // Apenas o líder faz broadcast
+        return
+    }
+
+    // Pega a configuração atual do cluster
+    configFuture := raftNode.GetConfiguration()
+    if err := configFuture.Error(); err != nil {
+        logger.Printf(ColorRed+"Erro ao obter configuração do cluster para broadcast: %v"+ColorReset, err)
+        return
+    }
+    config := configFuture.Configuration()
+
+    // Prepara o corpo da notificação
+    notificationPayload := map[string]interface{}{
+        "target_login": targetLogin,
+        "message":      messageToSend,
+    }
+    jsonBody, _ := json.Marshal(notificationPayload)
+
+    // Envia para cada servidor no cluster (exceto ele mesmo)
+    for _, server := range config.Servers {
+        if server.Address == transport.LocalAddr() {
+            continue // Não envia para si mesmo
+        }
+
+        // Converte o endereço RAFT (ex: "servidor2:12000") para o endereço HTTP (ex: "servidor2:8090")
+        httpAddr := strings.Replace(string(server.Address), ":12000", ":8090", 1)
+        targetURL := fmt.Sprintf("http://%s/notify-player", httpAddr)
+
+        // Dispara a requisição em uma goroutine para não bloquear
+        go func(url string, body []byte) {
+            client := http.Client{Timeout: 2 * time.Second}
+            resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+            if err != nil {
+                // É normal falhar se um nó estiver offline
+                // logger.Printf(ColorYellow+"Falha ao enviar notificação para %s: %v"+ColorReset, url, err)
+                return
+            }
+            defer resp.Body.Close()
+            // Não precisamos checar a resposta, apenas tentamos enviar
+             logger.Printf(ColorCyan+"Broadcast de notificação para %s (via %s) enviado."+ColorReset, targetLogin, url)
+        }(targetURL, jsonBody)
+    }
+}
+
 // --- INTERPRETADOR E CONEXÃO ---
 
 func handleConnection(conn net.Conn) {
@@ -888,6 +1207,27 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 		}
 	case "PLAY_NOTE":
 		handlePlayNote(conn, msg.Data)
+
+	case "GET_INVENTORY":
+        if player != nil {
+            // Acessa o inventário (protegido pelo mutex global 'mu')
+            // Usamos Lock/Unlock para leitura, permitindo leituras concorrentes
+            mu.Lock() // Usar Lock normal por enquanto para segurança, já que outros lugares usam Lock
+            currentInv := player.Inventario
+            mu.Unlock()
+
+            // Envia o inventário atual para o cliente
+            sendJSON(conn, protocolo.Message{
+                Type: "INVENTORY_RESPONSE",
+                Data: protocolo.InventoryResponse{Inventario: currentInv},
+            })
+        }
+
+	case "PROPOSE_TRADE":
+		if player != nil {
+			proposeTrade(player, msg.Data)
+		}
+
 	case "QUIT":
 		if player != nil {
 			mu.Lock()
@@ -1026,6 +1366,125 @@ func startHttpApi(nodeID string, httpAddr string) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	mux.HandleFunc("/request-trade", func(w http.ResponseWriter, r *http.Request) {
+        if raftNode.State() != raft.Leader {
+            http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable)
+            return
+        }
+
+        // Decodifica o payload INTERNO (reqBody é declarado aqui)
+        var reqBody map[string]interface{}
+        if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+            http.Error(w, "Corpo da requisição inválido", http.StatusBadRequest)
+            return
+        }
+
+        logger.Printf(ColorCyan+"[API REST] Recebido pedido de troca (encaminhado por um seguidor)"+ColorReset)
+
+        cmdPayload, _ := json.Marshal(reqBody)
+        cmd := []byte("PROPOSE_TRADE:" + string(cmdPayload))
+
+        future := raftNode.Apply(cmd, 500*time.Millisecond)
+        if err := future.Error(); err != nil {
+            resp := protocolo.TradeResponse{Status: "ERRO", Message: "Erro interno no servidor (RAFT)."}
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusInternalServerError)
+            json.NewEncoder(w).Encode(resp)
+            return
+        }
+
+        fsmResp := future.Response().(fsmApplyResponse)
+        w.Header().Set("Content-Type", "application/json")
+        if fsmResp.err != nil {
+            resp := protocolo.TradeResponse{Status: "ERRO", Message: fsmResp.err.Error()}
+            w.WriteHeader(http.StatusBadRequest)
+            json.NewEncoder(w).Encode(resp)
+            return
+        }
+
+        var httpResponse protocolo.TradeResponse // A resposta para o SEGUIDOR que pediu
+
+        switch result := fsmResp.response.(type) {
+        case protocolo.TradeResponse: // Oferta enviada ou Erro único
+            httpResponse = result
+
+        case FsmTradeCompletionResult: // Troca completada!
+            completionResult := result
+
+            // Descobre quem iniciou a requisição HTTP (o P1 da struct interna)
+            initiatorLogin := ""
+            if login, ok := reqBody["Player1Login"].(string); ok {
+                initiatorLogin = login
+            }
+
+            // Descobre qual resposta enviar de volta para o Seguidor
+            var responseForOther *protocolo.TradeResponse
+            var otherPlayerLogin string
+
+            // Verifica usando os logins retornados pela FSM
+            if initiatorLogin == completionResult.P2Login { // Iniciador é P2?
+                httpResponse = *completionResult.ResponseForP2
+                responseForOther = completionResult.ResponseForP1
+                otherPlayerLogin = completionResult.P1Login
+            } else { // Iniciador é P1?
+                httpResponse = *completionResult.ResponseForP1
+                responseForOther = completionResult.ResponseForP2
+                otherPlayerLogin = completionResult.P2Login
+            }
+
+            // --- CORREÇÃO: Faz BROADCAST para notificar o OUTRO jogador ---
+            messageForOther := protocolo.Message{Type: "TRADE_RESPONSE", Data: *responseForOther}
+            broadcastNotificationToPlayer(otherPlayerLogin, messageForOther)
+            // --- FIM DA CORREÇÃO ---
+
+        default:
+            // Erro inesperado
+            httpResponse = protocolo.TradeResponse{Status: "ERRO", Message: "Resposta interna do servidor inválida."}
+            w.WriteHeader(http.StatusInternalServerError)
+            json.NewEncoder(w).Encode(httpResponse)
+            return
+        }
+
+        // Envia a resposta relevante de volta para o Seguidor via HTTP
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(httpResponse)
+    }) // <-- Fim do handler /request-trade
+
+	mux.HandleFunc("/notify-player", func(w http.ResponseWriter, r *http.Request) {
+        // Estrutura esperada no corpo da requisição POST
+        var notification struct {
+            TargetLogin string                 `json:"target_login"`
+            Message     protocolo.Message      `json:"message"` // A mensagem completa a ser enviada
+        }
+
+        if err := json.NewDecoder(r.Body).Decode(&notification); err != nil {
+            http.Error(w, "Corpo da requisição inválido", http.StatusBadRequest)
+            return
+        }
+
+        if notification.TargetLogin == "" {
+             http.Error(w, "Missing target_login", http.StatusBadRequest)
+             return
+        }
+
+        logger.Printf(ColorCyan+"[API REST] Recebido pedido para notificar %s"+ColorReset, notification.TargetLogin)
+
+        // Tenta encontrar o jogador localmente e enviar a mensagem
+        mu.Lock()
+        targetPlayer, exists := players[notification.TargetLogin]
+        // Verifica se o jogador existe, está online E tem uma conexão ativa neste servidor
+        if exists && targetPlayer.Online && targetPlayer.Conn != nil {
+            // Envia a mensagem recebida diretamente para a conexão TCP do jogador
+            sendJSON(targetPlayer.Conn, notification.Message)
+            logger.Printf(ColorGreen+"[API REST] Notificação enviada para %s (conectado localmente)"+ColorReset, notification.TargetLogin)
+            w.WriteHeader(http.StatusOK) // Confirma que tentou (ou conseguiu) enviar
+        } else {
+             logger.Printf(ColorYellow+"[API REST] Jogador %s não conectado neste nó. Ignorando notificação."+ColorReset, notification.TargetLogin)
+             w.WriteHeader(http.StatusNotFound) // Indica que o jogador não foi encontrado aqui
+        }
+        mu.Unlock()
+    })
+
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		logger.Fatalf(ColorRed+"Falha ao iniciar servidor HTTP da API: %v"+ColorReset, err)
@@ -1079,7 +1538,7 @@ func main() {
 		logger.Fatalf("Erro ao criar snapshot store: %s", err)
 	}
 
-	transport, err := raft.NewTCPTransport(*raftAddr, nil, 3, 10*time.Second, os.Stderr)
+	transport, err = raft.NewTCPTransport(*raftAddr, nil, 3, 10*time.Second, os.Stderr)
 	if err != nil {
 		logger.Fatalf("Erro ao criar transport: %s", err)
 	}
@@ -1156,6 +1615,8 @@ func main() {
 	salas = make(map[string]*Sala)
 	salasEmEspera = make([]*Sala, 0)
 	playersInRoom = make(map[string]*Sala)
+
+	activeTrades = make(map[string]*TradeOffer)
 
 	for {
 		conn, err := listener.Accept()

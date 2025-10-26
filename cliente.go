@@ -36,6 +36,7 @@ var (
 	currentState      GameState
 	isMyTurn          bool
 	mqttClient        mqtt.Client
+	
 )
 
 // --- LÓGICA DE CONEXÃO E MQTT ---
@@ -191,6 +192,7 @@ func showMainMenu() {
 	fmt.Println("5. Meu Inventário")
 	fmt.Println("6. Selecionar Instrumento para Batalha")
 	fmt.Println("7. Consultar Saldo")
+	fmt.Println("8. Solicitar troca de carta")
 	fmt.Println("0. Sair")
 	fmt.Print("> ")
 }
@@ -418,11 +420,35 @@ ReconnectLoop:
 						fmt.Println("\nResposta da compra desconhecida:", data.Status)
 					}
 					currentState = MenuState // Volta ao menu após a tentativa de compra
+
 				case "BALANCE_RESPONSE":
 					var data protocolo.BalanceResponse
 					mapToStruct(msg.Data, &data)
 					fmt.Printf("\nSeu saldo atual: %d moedas.\n", data.Saldo)
 					currentBalance = data.Saldo // Atualiza saldo local
+
+				case "TRADE_RESPONSE":
+                    var data protocolo.TradeResponse
+                    mapToStruct(msg.Data, &data)
+
+                    fmt.Println("\n[SERVIDOR]: " + data.Message)
+
+                    if data.Status == "TRADE_COMPLETED" {
+                        // Atualiza o inventário local com o novo, vindo do servidor
+                        currentInventario = data.Inventario
+                        fmt.Println("Seu inventário foi atualizado.")
+                    }else if data.Status == "OFFER_SENT" {
+						fmt.Println("Oferta de troca enviada.")
+					}
+
+                    currentState = MenuState
+				case "INVENTORY_RESPONSE":
+					var data protocolo.InventoryResponse
+					mapToStruct(msg.Data, &data)
+					currentInventario = data.Inventario
+					showInventory()
+					currentState = MenuState
+
 				default:
 					fmt.Printf("\n[AVISO] Mensagem TCP de tipo desconhecido recebida: %s\n", msg.Type)
 				}
@@ -500,12 +526,39 @@ ReconnectLoop:
 							currentState = StopState
 						} // Aguarda resposta da compra
 					case "5":
-						showInventory()
+						sendErr = sendJSON(writer, protocolo.Message{Type: "GET_INVENTORY"})
+						fmt.Println("Buscando inventario atualizado")
+						currentState = StopState
 					case "6":
 						selectInstrument(writer, userInputReader) // Envio é feito dentro da função
 					case "7":
 						sendErr = sendJSON(writer, protocolo.Message{Type: "CHECK_BALANCE"})
 						// Continua no MenuState após pedir saldo
+					case "8":
+						if len(currentInventario.Instrumentos) == 0 {
+							fmt.Println("Você não tem instrumentos para trocar!")
+							continue
+						}
+						showInventory()
+						fmt.Print("Digite o número do instrumento que deseja OFERECER: ")
+						idxInput := readLine(userInputReader)
+						idx, err := strconv.Atoi(idxInput)
+						if err != nil || idx < 1 || idx > len(currentInventario.Instrumentos) {
+							fmt.Println("Seleção inválida.")
+							continue
+						}
+
+						fmt.Print("Digite o nome do jogador com quem deseja trocar: ")
+						loginP2 := readLine(userInputReader)
+
+						req := protocolo.TradeRequest{
+							InstrumentIndex: idx - 1, // Converte de 1-based para 0-based
+							Player2Login:    loginP2,
+						}
+						sendErr = sendJSON(writer, protocolo.Message{Type: "PROPOSE_TRADE", Data: req})
+						if sendErr == nil {
+							currentState = StopState // Aguarda a resposta
+						}
 					case "0":
 						fmt.Println("Saindo...")
 						sendErr = sendJSON(writer, protocolo.Message{Type: "QUIT"})
