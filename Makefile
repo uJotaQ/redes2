@@ -8,15 +8,15 @@
 
 # Sobe todo o ambiente (3 servidores + 1 broker)
 up:
-	@echo "Subindo broker e servidor1 (líder inicial)..."
+	@echo "Subindo broker e servidor1..."
 	docker compose up --build -d broker1 servidor1
 	@echo "Aguardando 0.5 segundos para o servidor1 se estabilizar..."
 	@sleep 0.1
-	@echo "Subindo servidor2 (seguidor)..."
+	@echo "Subindo servidor2 ..."
 	docker compose up --build -d servidor2
 	@echo "Aguardando 0.5 segundos..."
 	@sleep 0.1
-	@echo "Subindo servidor3 (seguidor)..."
+	@echo "Subindo servidor3 ..."
 	docker compose up --build -d servidor3
 	@echo "Cluster completo!"
 

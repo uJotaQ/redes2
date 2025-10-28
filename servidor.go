@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"sort"
 
 	"pbl_redes/protocolo"
 
@@ -50,7 +51,7 @@ type fsmApplyResponse struct { // Resposta da FSM pra o servidor dela proprio (t
 }
 
 type FsmTradeCompletionResult struct {
-	P1Login       string                   
+	P1Login       string
     P2Login       string
 	ResponseForP1 *protocolo.TradeResponse // Resposta formatada para o Player 1 original
 	ResponseForP2 *protocolo.TradeResponse // Resposta formatada para o Player 2 que completou
@@ -160,52 +161,71 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		return fsmApplyResponse{response: "OK"} // Sucesso
 
 	case "COMPRAR_PACOTE":
-		playerLogin := cmdPayload // Aqui o payload é só o login
+        playerLogin := cmdPayload // Aqui o payload é só o login
 
-		// --- Início da Lógica de Compra ---
-		mu.Lock() // Bloqueia o mapa de players
-		player, ok := players[playerLogin]
-		if !ok {
-			mu.Unlock()
-			logger.Printf("[FSM] Erro: jogador %s não encontrado.", playerLogin)
-			// Este era o seu erro. Agora ele só acontece se o jogador for deletado.
-			return fsmApplyResponse{err: fmt.Errorf("jogador não encontrado")}
-		}
-		mu.Unlock() // Desbloqueia o mapa de players
+        // --- Início da Lógica de Compra ---
+        mu.Lock() // Bloqueia o mapa de players
+        player, ok := players[playerLogin]
+        if !ok {
+            mu.Unlock()
+            logger.Printf("[FSM] Erro: jogador %s não encontrado.", playerLogin)
+            return fsmApplyResponse{err: fmt.Errorf("jogador não encontrado")}
+        }
+        mu.Unlock() // Desbloqueia o mapa de players
 
-		stockMu.Lock() // Bloqueia o estoque
-		defer stockMu.Unlock()
+        stockMu.Lock() // Bloqueia o estoque
+        defer stockMu.Unlock()
 
-		if player.Moedas < 20 {
-			// A checagem de saldo autoritativa (final)
-			return fsmApplyResponse{response: protocolo.CompraResponse{Status: "NO_BALANCE"}}
-		}
+        if player.Moedas < 20 {
+            // A checagem de saldo autoritativa (final)
+            return fsmApplyResponse{response: protocolo.CompraResponse{Status: "NO_BALANCE"}}
+        }
 
-		for id, packet := range packetStock {
-			if !packet.Opened {
-				player.Moedas -= 20
-				packet.Opened = true
-				newInstrument := packet.Instrument
-				player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
-				delete(packetStock, id)
+        // --- CORREÇÃO: Escolha Determinística do Pacote ---
+        var availablePacketIDs []string
+        for id, packet := range packetStock {
+            if !packet.Opened {
+                availablePacketIDs = append(availablePacketIDs, id)
+            }
+        }
 
-				// Reabastece o estoque
-				newPkt := generatePacket(fsmRand, packet.Rarity) // Usa o fsmRand
-				if newPkt != nil {
-					packetStock[newPkt.ID] = newPkt
-				}
+        if len(availablePacketIDs) == 0 {
+             // Não havia estoque (nenhum pacote não aberto)
+            return fsmApplyResponse{response: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}}
+        }
 
-				resp := protocolo.CompraResponse{
-					Status:          "COMPRA_APROVADA",
-					NovoInstrumento: &newInstrument,
-					Inventario:      player.Inventario,
-				}
-				return fsmApplyResponse{response: resp}
-			}
-		}
-		// Se o loop terminar, não havia estoque
-		return fsmApplyResponse{response: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}}
-		
+        // Ordena os IDs alfabeticamente para garantir a mesma ordem em todos os nós
+        sort.Strings(availablePacketIDs)
+        packetIDToGive := availablePacketIDs[0] // Pega sempre o primeiro ID da lista ordenada
+        packetToGive := packetStock[packetIDToGive]
+        // --- FIM DA CORREÇÃO ---
+
+        // Agora usa o pacote escolhido deterministicamente
+        player.Moedas -= 20
+        packetToGive.Opened = true // Marca como aberto (não removemos mais, só marcamos)
+        newInstrument := packetToGive.Instrument
+        player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
+        // Não deletamos mais do estoque principal para simplificar, apenas marcamos como Opened.
+        // Se precisar realmente remover, a lógica de reabastecimento ficaria mais complexa.
+        // delete(packetStock, packetIDToGive) // Removido por simplicidade
+
+        // Reabastece o estoque (COMENTADO - A lógica atual apenas marca como aberto)
+        // Se reativar o delete, precisa reativar o reabastecimento determinístico também.
+        /*
+        newPkt := generatePacket(fsmRand, packetToGive.Rarity) // Usa o fsmRand
+        if newPkt != nil {
+            packetStock[newPkt.ID] = newPkt
+        }
+        */
+
+        resp := protocolo.CompraResponse{
+            Status:          "COMPRA_APROVADA",
+            NovoInstrumento: &newInstrument,
+            Inventario:      player.Inventario,
+        }
+        return fsmApplyResponse{response: resp}
+        // Fim da lógica de compra
+
 	case "PROPOSE_TRADE":
         // O payload aqui é um JSON de uma struct interna que definimos
         var req struct {
@@ -253,10 +273,10 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
         if exists {
             // --- TROCA COMPLETA ---
             // A outra parte (P2) já ofereceu. Vamos completar a troca.
-            
+
             // A. Pegar a carta do P2 da oferta existente
             cardP2 := reverseOffer.CardPlayer1 // P1 da oferta reversa é o P2
-            
+
             // B. Verificar se P2 ainda tem a carta
             cardIndexP2 := -1
             for i, card := range player2.Inventario.Instrumentos {
@@ -281,7 +301,7 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
             // D. Adicionar as cartas trocadas
             player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos, cardP2)
             player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos, cardP1)
-            
+
             // E. Limpar a oferta
             delete(activeTrades, reverseTradeKey)
 
@@ -314,7 +334,7 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
             if _, exists := activeTrades[tradeKey]; exists {
                 return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você já tem uma oferta pendente para este jogador."}}
             }
-            
+
             // Criar e salvar a nova oferta
             activeTrades[tradeKey] = &TradeOffer{
                 Player1:     req.Player1Login,
@@ -322,9 +342,9 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
                 CardPlayer1: req.CardPlayer1,
                 Finished:    false,
             }
-            
+
             logger.Printf("[FSM] Nova oferta de troca registrada de %s para %s.", req.Player1Login, req.Player2Login)
-            
+
             return fsmApplyResponse{response: protocolo.TradeResponse{
                 Status:  "OFFER_SENT",
                 Message: fmt.Sprintf("Oferta de troca enviada para %s.", req.Player2Login),
@@ -367,33 +387,33 @@ func publishToPlayer(salaID, login string, message protocolo.Message) {
 const playerDataFile = "data/players.json"
 const instrumentDataFile = "data/instrumentos.json"
 
-func loadPlayerData() {
-	mu.Lock()
-	defer mu.Unlock()
-	data, err := os.ReadFile(playerDataFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			logger.Printf("Arquivo de jogadores (%s) não encontrado. Um novo será criado.", playerDataFile)
-			players = make(map[string]*User)
-		}
-		return
-	}
-	json.Unmarshal(data, &players)
-	logger.Printf("%d jogadores carregados.", len(players))
-}
+// func loadPlayerData() {
+// 	mu.Lock()
+// 	defer mu.Unlock()
+// 	data, err := os.ReadFile(playerDataFile)
+// 	if err != nil {
+// 		if os.IsNotExist(err) {
+// 			logger.Printf("Arquivo de jogadores (%s) não encontrado. Um novo será criado.", playerDataFile)
+// 			players = make(map[string]*User)
+// 		}
+// 		return
+// 	}
+// 	json.Unmarshal(data, &players)
+// 	logger.Printf("%d jogadores carregados.", len(players))
+// }
 
-func savePlayerData() {
-	logger.Println("\nSalvando dados dos jogadores...")
-	mu.Lock()
-	defer mu.Unlock()
-	for _, player := range players {
-		player.Online = false
-		player.Conn = nil
-	}
-	data, _ := json.MarshalIndent(players, "", "  ")
-	os.WriteFile(playerDataFile, data, 0644)
-	logger.Printf("Dados de %d jogadores salvos.", len(players))
-}
+// func savePlayerData() {
+// 	logger.Println("\nSalvando dados dos jogadores...")
+// 	mu.Lock()
+// 	defer mu.Unlock()
+// 	for _, player := range players {
+// 		player.Online = false
+// 		player.Conn = nil
+// 	}
+// 	data, _ := json.MarshalIndent(players, "", "  ")
+// 	os.WriteFile(playerDataFile, data, 0644)
+// 	logger.Printf("Dados de %d jogadores salvos.", len(players))
+// }
 
 // --- LÓGICA DE LOGIN E CADASTRO ---
 
@@ -520,6 +540,16 @@ func randomGenerate(length int) string {
 		b[i] = charset[rand.Intn(len(charset))]
 	}
 	return string(b)
+}
+
+
+func randomGenerateDeterministic(r *rand.Rand, length int) string {
+    const charset = "ACDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    b := make([]byte, length)
+    for i := range b {
+        b[i] = charset[r.Intn(len(charset))] // Usa o 'r' (o rand determinístico)
+    }
+    return string(b)
 }
 
 func findPlayerByConn(conn net.Conn) *User {
@@ -834,41 +864,55 @@ func GetRandomInstrumentByRarity(localRand *rand.Rand, rarity string) *protocolo
 }
 
 func generatePacket(localRand *rand.Rand, rarity string) *protocolo.Packet {
-	instrument := GetRandomInstrumentByRarity(localRand, rarity)
-	if instrument == nil {
-		return nil
-	}
-	return &protocolo.Packet{
-		ID:         randomGenerate(4),
-		Rarity:     rarity,
-		Instrument: *instrument,
-		Opened:     false,
-	}
+                                        // ^-- Note: localRand aqui é o fsmRand quando chamado pela FSM
+    instrument := GetRandomInstrumentByRarity(localRand, rarity)
+    if instrument == nil {
+        return nil
+    }
+
+    // Gera o ID único e DETERMINÍSTICO usando o rand passado (fsmRand)
+    uniqueID := randomGenerateDeterministic(localRand, 4)
+
+    // "Carimba" o ID único no instrumento
+    instrument.ID = uniqueID
+
+    // Retorna o pacote usando o mesmo ID
+    return &protocolo.Packet{
+        ID:         uniqueID,
+        Rarity:     rarity,
+        Instrument: *instrument,
+        Opened:     false,
+    }
 }
 
 func initializePacketStock() {
-	// Cria um gerador de números aleatórios com uma semente FIXA.
-	// Isso garante que TODOS os servidores gerem o MESMO estoque inicial.
-	localRand := rand.New(rand.NewSource(12345)) // Semente fixa
+    // Cria um gerador de números aleatórios com uma semente FIXA.
+    localRand := rand.New(rand.NewSource(12345)) // Semente fixa
 
-	packetStock = make(map[string]*protocolo.Packet)
-	rarities := []string{"Comum", "Raro", "Épico", "Lendário"}
-	for _, rarity := range rarities {
-		for i := 0; i < 50; i++ {
-			// GetRandomInstrumentByRarity precisa ser modificado para aceitar o localRand
-			instrument := GetRandomInstrumentByRarity(localRand, rarity) // Passa o rand
-			if instrument != nil {
-				packet := &protocolo.Packet{
-					ID:         randomGenerate(4), // Este rand não afeta o estado
-					Rarity:     rarity,
-					Instrument: *instrument,
-					Opened:     false,
-				}
-				packetStock[packet.ID] = packet
-			}
-		}
-	}
-	logger.Printf("Estoque de pacotes inicializado com %d pacotes.", len(packetStock))
+    packetStock = make(map[string]*protocolo.Packet)
+    rarities := []string{"Comum", "Raro", "Épico", "Lendário"}
+    for _, rarity := range rarities {
+        for i := 0; i < 50; i++ {
+            instrument := GetRandomInstrumentByRarity(localRand, rarity) // Pega um instrumento base
+            if instrument != nil {
+                // Gera o ID único e DETERMINÍSTICO
+                uniqueID := randomGenerateDeterministic(localRand, 4)
+
+                // "Carimba" o ID único no instrumento
+                instrument.ID = uniqueID
+
+                // Cria o pacote usando o mesmo ID único
+                packet := &protocolo.Packet{
+                    ID:         uniqueID, // ID do pacote == ID do instrumento
+                    Rarity:     rarity,
+                    Instrument: *instrument,
+                    Opened:     false,
+                }
+                packetStock[packet.ID] = packet
+            }
+        }
+    }
+    logger.Printf("Estoque de pacotes inicializado com %d pacotes.", len(packetStock))
 }
 
 func openPacket(player *User) {
@@ -1512,11 +1556,14 @@ func main() {
 	fsmRand = rand.New(rand.NewSource(12345))
 
 	os.MkdirAll("data", 0755)
-	loadPlayerData()
+	// loadPlayerData()
 	if err := loadInstruments(); err != nil {
 		logger.Fatal(err)
 	}
+
+	players = make(map[string]*User)
 	initializePacketStock()
+
 
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(*nodeID)
@@ -1599,11 +1646,11 @@ func main() {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigs
-		savePlayerData()
-		os.Exit(0)
-	}()
+	// go func() {
+	// 	<-sigs
+	// 	savePlayerData()
+	// 	os.Exit(0)
+	// }()
 
 	listener, err := net.Listen("tcp", *tcpAddr)
 	if err != nil {

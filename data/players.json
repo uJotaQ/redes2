@@ -175,37 +175,6 @@
     "Inventario": {
       "instrumentos": [
         {
-          "id": "FLUTE_001",
-          "name": "Flauta",
-          "rarity": "Comum",
-          "attacks": [
-            {
-              "name": "Trinado",
-              "sequence": [
-                "C",
-                "D",
-                "E"
-              ]
-            },
-            {
-              "name": "Sopro Forte",
-              "sequence": [
-                "F",
-                "G",
-                "C"
-              ]
-            },
-            {
-              "name": "Melodia Doce",
-              "sequence": [
-                "A",
-                "B",
-                "C"
-              ]
-            }
-          ]
-        },
-        {
           "id": "BASS_001",
           "name": "Contrabaixo",
           "rarity": "Raro",
@@ -979,6 +948,37 @@
               ]
             }
           ]
+        },
+        {
+          "id": "HARP_001",
+          "name": "Harpa",
+          "rarity": "Lendário",
+          "attacks": [
+            {
+              "name": "Arpejo Celestial",
+              "sequence": [
+                "C",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Glissando Suave",
+              "sequence": [
+                "D",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Eco Etéreo",
+              "sequence": [
+                "E",
+                "A",
+                "C"
+              ]
+            }
+          ]
         }
       ]
     },
@@ -1015,6 +1015,94 @@
         }
       ]
     }
+  },
+  "New1": {
+    "Login": "New1",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "SAX_001",
+          "name": "Saxofone",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Improviso Jazz",
+              "sequence": [
+                "E",
+                "G",
+                "B"
+              ]
+            },
+            {
+              "name": "Sopro Grave",
+              "sequence": [
+                "C",
+                "E",
+                "A"
+              ]
+            },
+            {
+              "name": "Nota Sustentada",
+              "sequence": [
+                "D",
+                "F",
+                "G"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 80,
+    "Latencia": 0,
+    "SelectedInstrument": null
+  },
+  "New2": {
+    "Login": "New2",
+    "Senha": "123",
+    "Conn": null,
+    "Online": false,
+    "Inventario": {
+      "instrumentos": [
+        {
+          "id": "TRUMPET_001",
+          "name": "Trompete",
+          "rarity": "Raro",
+          "attacks": [
+            {
+              "name": "Susto Sonoro",
+              "sequence": [
+                "C",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Escalada",
+              "sequence": [
+                "D",
+                "F",
+                "A"
+              ]
+            },
+            {
+              "name": "Sopro Metálico",
+              "sequence": [
+                "E",
+                "A",
+                "B"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Moedas": 80,
+    "Latencia": 0,
+    "SelectedInstrument": null
   },
   "Novim": {
     "Login": "Novim",
@@ -1496,31 +1584,31 @@
           ]
         },
         {
-          "id": "HARP_001",
-          "name": "Harpa",
-          "rarity": "Lendário",
+          "id": "FLUTE_001",
+          "name": "Flauta",
+          "rarity": "Comum",
           "attacks": [
             {
-              "name": "Arpejo Celestial",
+              "name": "Trinado",
               "sequence": [
                 "C",
-                "F",
-                "A"
-              ]
-            },
-            {
-              "name": "Glissando Suave",
-              "sequence": [
                 "D",
-                "G",
-                "B"
+                "E"
               ]
             },
             {
-              "name": "Eco Etéreo",
+              "name": "Sopro Forte",
               "sequence": [
-                "E",
+                "F",
+                "G",
+                "C"
+              ]
+            },
+            {
+              "name": "Melodia Doce",
+              "sequence": [
                 "A",
+                "B",
                 "C"
               ]
             }
