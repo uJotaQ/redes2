@@ -92,46 +92,74 @@ func messageHandler(client mqtt.Client, msg mqtt.Message) {
 }
 
 func setupMQTTClient() {
-	opts := mqtt.NewClientOptions()
-	// Conecta ao broker exposto pelo Docker no localhost
-	opts.AddBroker("tcp://127.0.0.1:1883")
-	// Cria um ID único para evitar conflitos se rodar múltiplos clientes
-	opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().UnixNano()))
-	opts.SetDefaultPublishHandler(messageHandler)
-	opts.SetAutoReconnect(true)
-	opts.SetConnectRetry(true)
-	// Define um callback para quando a conexão for perdida
-	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-		fmt.Printf("\n[MQTT] Conexão perdida: %v. Tentando reconectar...\n", err)
-	})
-	// Define um callback para quando a conexão for reestabelecida
-	opts.SetOnConnectHandler(func(client mqtt.Client) {
-		fmt.Println("\n[MQTT] Conexão reestabelecida!")
-		// Se o usuário estiver logado, poderia tentar se reinscrever nos tópicos aqui,
-		// mas a lógica atual de re-inscrição após PAREADO é suficiente por enquanto.
-	})
+    // Se o cliente já foi configurado, não faz nada
+    if mqttClient != nil {
+        // Se por acaso estava conectado, desconecta para garantir um estado limpo
+        if mqttClient.IsConnected() {
+            mqttClient.Disconnect(100)
+        }
+    }
 
-	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-		fmt.Println("[AVISO] Não foi possível conectar ao Broker MQTT:", token.Error())
-		// Não encerra o programa, o cliente tentará reconectar em background
-	} else if token.Error() == nil {
-		fmt.Println("\n[INFO] Conexão MQTT inicial estabelecida.")
-	}
+    opts := mqtt.NewClientOptions()
+    opts.AddBroker("tcp://127.0.0.1:1883")
+    opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().UnixNano()))
+    opts.SetDefaultPublishHandler(messageHandler)
+
+    // *** REMOVEMOS A RECONEXÃO AUTOMÁTICA ***
+    // opts.SetAutoReconnect(true) 
+    // opts.SetConnectRetry(true)
+    
+    // Mantém os handlers apenas para debug, se quiser
+    opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+        fmt.Printf("\n[MQTT DEBUG] Conexão perdida: %v.\n", err)
+    })
+    opts.SetOnConnectHandler(func(client mqtt.Client) {
+        fmt.Println("\n[MQTT DEBUG] Conexão estabelecida.")
+    })
+
+    mqttClient = mqtt.NewClient(opts)
+    
+    // *** NÃO CONECTA AQUI ***
+    // A conexão será feita "sob demanda" pela função subscribe.
+    fmt.Println("\n[INFO] Cliente MQTT configurado (mas não conectado).")
 }
 
 func subscribeToGameTopic(salaID, playerLogin string) {
-	if mqttClient == nil || !mqttClient.IsConnected() {
-		fmt.Println("[AVISO] Cliente MQTT não conectado. Não foi possível se inscrever no tópico do jogo.")
-		return
-	}
-	topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
-	// Usa QOS 1 para maior garantia de entrega das mensagens de jogo
-	if token := mqttClient.Subscribe(topic, 1, nil); token.WaitTimeout(3*time.Second) && token.Error() != nil {
-		fmt.Printf("[ERRO] Falha ao se inscrever no tópico do jogo %s: %v\n", topic, token.Error())
-	} else if token.Error() == nil {
-		fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
-	}
+    if mqttClient == nil {
+        fmt.Println("[ERRO] Cliente MQTT não foi configurado (setupMQTTClient nunca foi chamado).")
+        return
+    }
+
+    // Se por acaso já estava conectado (de um jogo anterior), desconecta primeiro
+    // para garantir uma conexão "limpa".
+    if mqttClient.IsConnected() {
+        fmt.Println("[INFO] Desconectando de sessão MQTT antiga...")
+        mqttClient.Disconnect(250) // Espera 250ms
+    }
+
+    // --- CONEXÃO ATIVA ---
+    // Tenta conectar AGORA.
+    fmt.Println("[INFO] Conectando ao broker MQTT para a partida...")
+    if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+        // Se a conexão falhar AGORA, reporta o erro e desiste.
+        fmt.Printf("[ERRO] Falha fatal ao conectar no MQTT: %v\n", token.Error())
+        fmt.Println("Não será possível receber atualizações do jogo.")
+        return
+    }
+    
+    // Se chegou aqui, a conexão foi feita com sucesso.
+    fmt.Println("[INFO] Conexão MQTT estabelecida com sucesso.")
+
+    // --- INSCRIÇÃO ---
+    // Agora que temos 100% de certeza que a conexão está ativa,
+    // podemos nos inscrever com segurança.
+    topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
+    if token := mqttClient.Subscribe(topic, 1, nil); token.WaitTimeout(3*time.Second) && token.Error() != nil {
+        // Se falhar aqui, é o erro que você viu.
+        fmt.Printf("[ERRO] Falha ao se inscrever no tópico do jogo %s: %v\n", topic, token.Error())
+    } else if token.Error() == nil {
+        fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
+    }
 }
 
 // Desinscreve do tópico no final do jogo ou desconexão

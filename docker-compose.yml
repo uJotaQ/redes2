@@ -1,5 +1,3 @@
-
-
 services:
   broker1:
     image: eclipse-mosquitto:2
@@ -9,7 +7,10 @@ services:
     ports:
       - "1883:1883"
       - "9001:9001"
-
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: always
+    
   servidor1:
     build: .
     container_name: servidor1

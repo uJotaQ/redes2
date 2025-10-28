@@ -79,11 +79,13 @@ type GameState struct {
 
 type Sala struct {
 	ID        string
-	Jogador1  net.Conn
-	Jogador2  net.Conn
+	Jogador1  net.Conn // Estado volátil, não usado pela FSM
+	Jogador2  net.Conn // Estado volátil, não usado pela FSM
+	P1Login   string   // <-- ADICIONE: Login do P1 (estado RAFT)
+	P2Login   string   // <-- ADICIONE: Login do P2 (estado RAFT)
 	Status    string
 	IsPrivate bool
-	Game      *GameState
+	Game      *GameState // Estado do jogo (estado RAFT)
 }
 
 // Struct para armazenar ofertas de troca pendentes
@@ -121,8 +123,6 @@ type FSM struct{}
 
 func (f *FSM) Apply(log *raft.Log) interface{} {
 	cmd := string(log.Data)
-	// Divide o comando em "TIPO" e "PAYLOAD"
-	// Usamos SplitN com N=2 para garantir que o payload (que pode ser JSON) não seja quebrado
 	parts := strings.SplitN(cmd, ":", 2)
 
 	if len(parts) < 1 {
@@ -135,7 +135,6 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		cmdPayload = parts[1]
 	}
 
-	// Um switch para lidar com diferentes tipos de comando
 	switch cmdType {
 
 	case "CADASTRAR_JOGADOR":
@@ -143,45 +142,36 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
 			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar cadastro")}
 		}
-
-		// Esta é a lógica que estava em cadastrarUser, agora dentro da FSM
 		mu.Lock()
 		defer mu.Unlock()
-
 		if _, exists := players[data.Login]; exists {
 			return fsmApplyResponse{err: fmt.Errorf("Login já existe.")}
 		}
-
 		players[data.Login] = &User{
 			Login:  data.Login,
 			Senha:  data.Senha,
-			Moedas: 100, // Saldo inicial
+			Moedas: 100,
 		}
 		logger.Printf("[FSM] Jogador %s cadastrado com sucesso.", data.Login)
-		return fsmApplyResponse{response: "OK"} // Sucesso
+		return fsmApplyResponse{response: "OK"}
 
 	case "COMPRAR_PACOTE":
-        playerLogin := cmdPayload // Aqui o payload é só o login
-
-        // --- Início da Lógica de Compra ---
-        mu.Lock() // Bloqueia o mapa de players
+        playerLogin := cmdPayload
+        mu.Lock()
         player, ok := players[playerLogin]
+        mu.Unlock() // Desbloqueia logo após ler o player
         if !ok {
-            mu.Unlock()
-            logger.Printf("[FSM] Erro: jogador %s não encontrado.", playerLogin)
+            logger.Printf("[FSM] Erro: jogador %s não encontrado para compra.", playerLogin)
             return fsmApplyResponse{err: fmt.Errorf("jogador não encontrado")}
         }
-        mu.Unlock() // Desbloqueia o mapa de players
 
-        stockMu.Lock() // Bloqueia o estoque
+        stockMu.Lock() // Bloqueia apenas o estoque agora
         defer stockMu.Unlock()
 
         if player.Moedas < 20 {
-            // A checagem de saldo autoritativa (final)
             return fsmApplyResponse{response: protocolo.CompraResponse{Status: "NO_BALANCE"}}
         }
 
-        // --- CORREÇÃO: Escolha Determinística do Pacote ---
         var availablePacketIDs []string
         for id, packet := range packetStock {
             if !packet.Opened {
@@ -190,29 +180,26 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
         }
 
         if len(availablePacketIDs) == 0 {
-             // Não havia estoque (nenhum pacote não aberto)
             return fsmApplyResponse{response: protocolo.CompraResponse{Status: "EMPTY_STORAGE"}}
         }
 
-        // Ordena os IDs alfabeticamente para garantir a mesma ordem em todos os nós
         sort.Strings(availablePacketIDs)
-        packetIDToGive := availablePacketIDs[0] // Pega sempre o primeiro ID da lista ordenada
+        packetIDToGive := availablePacketIDs[0]
         packetToGive := packetStock[packetIDToGive]
-        // --- FIM DA CORREÇÃO ---
 
-        // Agora usa o pacote escolhido deterministicamente
+        // Atualiza estado do jogador (precisa de Lock de novo)
+        mu.Lock()
         player.Moedas -= 20
-        packetToGive.Opened = true // Marca como aberto (não removemos mais, só marcamos)
+        packetToGive.Opened = true
         newInstrument := packetToGive.Instrument
         player.Inventario.Instrumentos = append(player.Inventario.Instrumentos, newInstrument)
-        // Não deletamos mais do estoque principal para simplificar, apenas marcamos como Opened.
-        // Se precisar realmente remover, a lógica de reabastecimento ficaria mais complexa.
-        // delete(packetStock, packetIDToGive) // Removido por simplicidade
+        // Mantém cópia do inventário para resposta antes de desbloquear
+        finalInventory := player.Inventario
+        mu.Unlock()
 
-        // Reabastece o estoque (COMENTADO - A lógica atual apenas marca como aberto)
-        // Se reativar o delete, precisa reativar o reabastecimento determinístico também.
+        // Reabastecimento comentado
         /*
-        newPkt := generatePacket(fsmRand, packetToGive.Rarity) // Usa o fsmRand
+        newPkt := generatePacket(fsmRand, packetToGive.Rarity)
         if newPkt != nil {
             packetStock[newPkt.ID] = newPkt
         }
@@ -221,135 +208,289 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
         resp := protocolo.CompraResponse{
             Status:          "COMPRA_APROVADA",
             NovoInstrumento: &newInstrument,
-            Inventario:      player.Inventario,
+            Inventario:      finalInventory, // Usa a cópia
         }
         return fsmApplyResponse{response: resp}
-        // Fim da lógica de compra
+
 
 	case "PROPOSE_TRADE":
-        // O payload aqui é um JSON de uma struct interna que definimos
-        var req struct {
-            Player1Login string
-            Player2Login string
-            CardPlayer1  protocolo.Instrumento
-        }
-        if err := json.Unmarshal([]byte(cmdPayload), &req); err != nil {
-            return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar troca")}
-        }
+		var req struct {
+			Player1Login string
+			Player2Login string
+			CardPlayer1  protocolo.Instrumento
+		}
+		if err := json.Unmarshal([]byte(cmdPayload), &req); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar troca")}
+		}
 
-        // 1. Travar ambos os mapas
-        mu.Lock()
-        tradeMu.Lock()
-        defer mu.Unlock()
-        defer tradeMu.Unlock()
+		mu.Lock()     // Bloqueia players
+		tradeMu.Lock() // Bloqueia trades
+		defer mu.Unlock()
+		defer tradeMu.Unlock()
 
-        // 2. Validações (feitas aqui dentro da FSM para garantir consistência)
-        if req.Player1Login == req.Player2Login {
-            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não pode trocar cartas consigo mesmo."}}
-        }
+		if req.Player1Login == req.Player2Login {
+			return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não pode trocar cartas consigo mesmo."}}
+		}
+		player1, ok1 := players[req.Player1Login]
+		player2, ok2 := players[req.Player2Login]
+		if !ok1 || !ok2 {
+			return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Jogador não encontrado."}}
+		}
 
-        player1, ok1 := players[req.Player1Login]
-        player2, ok2 := players[req.Player2Login]
-        if !ok1 || !ok2 {
-            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Jogador não encontrado."}}
-        }
+		cardIndexP1 := -1
+		for i, card := range player1.Inventario.Instrumentos {
+			if card.ID == req.CardPlayer1.ID {
+				cardIndexP1 = i
+				break
+			}
+		}
+		if cardIndexP1 == -1 {
+			return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não possui mais esta carta."}}
+		}
 
-        // 3. Verificar se o P1 realmente tem a carta
-        cardIndexP1 := -1
-        for i, card := range player1.Inventario.Instrumentos {
-            if card.ID == req.CardPlayer1.ID { // Compara por ID
-                cardIndexP1 = i
-                break
-            }
-        }
-        if cardIndexP1 == -1 {
-            return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você não possui mais esta carta."}}
-        }
+		reverseTradeKey := req.Player2Login + ":" + req.Player1Login
+		reverseOffer, exists := activeTrades[reverseTradeKey]
 
-        // 4. Lógica de "Mão Dupla"
-        reverseTradeKey := req.Player2Login + ":" + req.Player1Login
-        reverseOffer, exists := activeTrades[reverseTradeKey]
+		if exists {
+			cardP2 := reverseOffer.CardPlayer1
+			cardIndexP2 := -1
+			for i, card := range player2.Inventario.Instrumentos {
+				if card.ID == cardP2.ID {
+					cardIndexP2 = i
+					break
+				}
+			}
+			if cardIndexP2 == -1 {
+				delete(activeTrades, reverseTradeKey)
+				return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "O outro jogador não possui mais a carta oferecida. A oferta dele foi cancelada."}}
+			}
 
-        if exists {
-            // --- TROCA COMPLETA ---
-            // A outra parte (P2) já ofereceu. Vamos completar a troca.
-
-            // A. Pegar a carta do P2 da oferta existente
-            cardP2 := reverseOffer.CardPlayer1 // P1 da oferta reversa é o P2
-
-            // B. Verificar se P2 ainda tem a carta
-            cardIndexP2 := -1
-            for i, card := range player2.Inventario.Instrumentos {
-                if card.ID == cardP2.ID {
-                    cardIndexP2 = i
-                    break
-                }
-            }
-            if cardIndexP2 == -1 {
-                // P2 não tem mais a carta. A oferta dele é inválida.
-                delete(activeTrades, reverseTradeKey) // Remove a oferta inválida
-                return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "O outro jogador não possui mais a carta oferecida. A oferta dele foi cancelada."}}
-            }
-
-            // C. Remover as cartas dos inventários
-            // (Remover P1)
-            cardP1 := player1.Inventario.Instrumentos[cardIndexP1]
-            player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos[:cardIndexP1], player1.Inventario.Instrumentos[cardIndexP1+1:]...)
-            // (Remover P2)
-            player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos[:cardIndexP2], player2.Inventario.Instrumentos[cardIndexP2+1:]...)
-
-            // D. Adicionar as cartas trocadas
-            player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos, cardP2)
-            player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos, cardP1)
-
-            // E. Limpar a oferta
-            delete(activeTrades, reverseTradeKey)
+			cardP1 := player1.Inventario.Instrumentos[cardIndexP1]
+			player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos[:cardIndexP1], player1.Inventario.Instrumentos[cardIndexP1+1:]...)
+			player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos[:cardIndexP2], player2.Inventario.Instrumentos[cardIndexP2+1:]...)
+			player1.Inventario.Instrumentos = append(player1.Inventario.Instrumentos, cardP2)
+			player2.Inventario.Instrumentos = append(player2.Inventario.Instrumentos, cardP1)
+			delete(activeTrades, reverseTradeKey)
 
 			respP1 := protocolo.TradeResponse{
-                Status:          "TRADE_COMPLETED",
-                Message:         fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player2.Login, cardP2.Name),
-                Inventario:      player1.Inventario, // Inventário final do P1
-                ReceivedCard:    &cardP2,           // Carta que P1 recebeu
-                OtherPlayerLogin: player2.Login,    // Quem P1 trocou
-            }
-            respP2 := protocolo.TradeResponse{
-                Status:          "TRADE_COMPLETED",
-                Message:         fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player1.Login, cardP1.Name),
-                Inventario:      player2.Inventario, // Inventário final do P2
-                ReceivedCard:    &cardP1,           // Carta que P2 recebeu
-                OtherPlayerLogin: player1.Login,    // Quem P2 trocou
-            }
+				Status:           "TRADE_COMPLETED",
+				Message:          fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player2.Login, cardP2.Name),
+				Inventario:       player1.Inventario,
+				ReceivedCard:     &cardP2,
+				OtherPlayerLogin: player2.Login,
+			}
+			respP2 := protocolo.TradeResponse{
+				Status:           "TRADE_COMPLETED",
+				Message:          fmt.Sprintf("Troca com %s concluída! Você recebeu: %s", player1.Login, cardP1.Name),
+				Inventario:       player2.Inventario,
+				ReceivedCard:     &cardP1,
+				OtherPlayerLogin: player1.Login,
+			}
+			logger.Printf("[FSM] Troca concluída entre %s e %s.", player1.Login, player2.Login)
+			return fsmApplyResponse{response: FsmTradeCompletionResult{
+				P1Login:       player1.Login,
+				P2Login:       player2.Login,
+				ResponseForP1: &respP1,
+				ResponseForP2: &respP2,
+			}}
 
-            logger.Printf("[FSM] Troca concluída entre %s e %s.", player1.Login, player2.Login)
+		} else {
+			tradeKey := req.Player1Login + ":" + req.Player2Login
+			if _, exists := activeTrades[tradeKey]; exists {
+				return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você já tem uma oferta pendente para este jogador."}}
+			}
+			activeTrades[tradeKey] = &TradeOffer{
+				Player1:     req.Player1Login,
+				Player2:     req.Player2Login,
+				CardPlayer1: req.CardPlayer1,
+				Finished:    false,
+			}
+			logger.Printf("[FSM] Nova oferta de troca registrada de %s para %s.", req.Player1Login, req.Player2Login)
+			return fsmApplyResponse{response: protocolo.TradeResponse{
+				Status:  "OFFER_SENT",
+				Message: fmt.Sprintf("Oferta de troca enviada para %s.", req.Player2Login),
+			}}
+		}
 
-            // Retorna ambas as respostas, empacotadas na nova struct
-            return fsmApplyResponse{response: FsmTradeCompletionResult{
-                ResponseForP1: &respP1,
-                ResponseForP2: &respP2,
-            }}
+	// --- NOVOS CASES PARA O JOGO ---
 
-        } else {
-            // --- NOVA OFERTA DE TROCA ---
-            tradeKey := req.Player1Login + ":" + req.Player2Login
-            if _, exists := activeTrades[tradeKey]; exists {
-                return fsmApplyResponse{response: protocolo.TradeResponse{Status: "ERRO", Message: "Você já tem uma oferta pendente para este jogador."}}
-            }
+	case "CREATE_ROOM_RAFT":
+		var data struct {
+			RoomID       string `json:"room_id"`
+			Player1Login string `json:"player1_login"`
+			IsPrivate    bool   `json:"is_private"`
+		}
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar create_room")}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		player1, ok := players[data.Player1Login]
+		if !ok {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s não encontrado para criar sala."+ColorReset, data.Player1Login)
+			return fsmApplyResponse{response: "PlayerNotFound"}
+		}
+		if _, inRoom := playersInRoom[player1.Login]; inRoom {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s já está em uma sala."+ColorReset, data.Player1Login)
+			return fsmApplyResponse{response: "PlayerInRoom"}
+		}
+		novaSala := &Sala{
+			ID:        data.RoomID,
+			P1Login:   data.Player1Login, // Salva P1Login
+			Status:    "Waiting_Player",
+			IsPrivate: data.IsPrivate,
+		}
+		salas[data.RoomID] = novaSala
+		playersInRoom[data.Player1Login] = novaSala
+		if !data.IsPrivate {
+			salasEmEspera = append(salasEmEspera, novaSala)
+		}
+		logger.Printf("[FSM] Sala %s criada para %s (Privada: %t).", data.RoomID, data.Player1Login, data.IsPrivate)
+		return fsmApplyResponse{response: "RoomCreated"}
 
-            // Criar e salvar a nova oferta
-            activeTrades[tradeKey] = &TradeOffer{
-                Player1:     req.Player1Login,
-                Player2:     req.Player2Login,
-                CardPlayer1: req.CardPlayer1,
-                Finished:    false,
-            }
+	case "JOIN_ROOM_RAFT":
+		var data struct {
+			RoomID       string `json:"room_id"`
+			Player2Login string `json:"player2_login"`
+		}
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar join_room")}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		_, ok := players[data.Player2Login] // Renomeado para _
+		if !ok {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s não encontrado para entrar na sala."+ColorReset, data.Player2Login)
+			return fsmApplyResponse{response: "PlayerNotFound"}
+		}
+		if _, inRoom := playersInRoom[data.Player2Login]; inRoom {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s já está em uma sala."+ColorReset, data.Player2Login)
+			return fsmApplyResponse{response: "PlayerInRoom"}
+		}
+		sala, exists := salas[data.RoomID]
+		if !exists {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Sala %s não encontrada para join."+ColorReset, data.RoomID)
+			return fsmApplyResponse{response: "RoomNotFound"}
+		}
+		if sala.Status != "Waiting_Player" {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Sala %s não está esperando jogadores."+ColorReset, data.RoomID)
+			return fsmApplyResponse{response: "RoomNotWaiting"}
+		}
+		sala.Status = "Em_Jogo"
+		sala.P2Login = data.Player2Login // Salva P2Login
+		playersInRoom[data.Player2Login] = sala
+		if !sala.IsPrivate {
+			for i, s := range salasEmEspera {
+				if s.ID == sala.ID {
+					salasEmEspera = append(salasEmEspera[:i], salasEmEspera[i+1:]...)
+					break
+				}
+			}
+		}
+		sala.Game = &GameState{
+			CurrentTurn:  1,
+			PlayedNotes:  []string{},
+			Player1Score: 0,
+			Player2Score: 0,
+		}
+		logger.Printf("[FSM] Jogador %s entrou na sala %s. Jogo iniciado.", data.Player2Login, data.RoomID)
+		return fsmApplyResponse{response: map[string]string{
+			"status":  "GameStarted",
+			"p1Login": sala.P1Login, // Usa o P1Login salvo
+			"p2Login": data.Player2Login,
+		}}
 
-            logger.Printf("[FSM] Nova oferta de troca registrada de %s para %s.", req.Player1Login, req.Player2Login)
+	case "PLAY_NOTE_RAFT":
+		var data struct {
+			PlayerLogin string `json:"player_login"`
+			Note        string `json:"note"`
+		}
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar play_note")}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		_, ok := players[data.PlayerLogin] // Renomeado para _
+		if !ok {
+			return fsmApplyResponse{err: fmt.Errorf("jogador não encontrado")}
+		}
+		sala, inRoom := playersInRoom[data.PlayerLogin]
+		if !inRoom || sala.Game == nil || sala.Status != "Em_Jogo" {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s tentou jogar nota fora de jogo ativo."+ColorReset, data.PlayerLogin)
+			return fsmApplyResponse{response: "NotInGame"}
+		}
+		playerNum := 0
+		if data.PlayerLogin == sala.P1Login { // Usa P1Login da sala
+			playerNum = 1
+		} else {
+			playerNum = 2
+		}
+		if sala.Game.CurrentTurn != playerNum {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Não é a vez de %s jogar."+ColorReset, data.PlayerLogin)
+			return fsmApplyResponse{response: "NotYourTurn"}
+		}
+		validNotes := "ABCDEFG"
+		note := strings.ToUpper(data.Note)
+		if len(note) != 1 || !strings.Contains(validNotes, note) {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Nota inválida '%s' de %s."+ColorReset, data.Note, data.PlayerLogin)
+			return fsmApplyResponse{response: "InvalidNote"}
+		}
+		sala.Game.PlayedNotes = append(sala.Game.PlayedNotes, note)
+		p1 := players[sala.P1Login] // Pega P1 usando P1Login da sala
+		p2 := players[sala.P2Login] // Pega P2 usando P2Login da sala
+		attackName, attackerLogin := checkAttackCompletionFSM(sala, p1, p2)
+		sequenceStr := strings.Join(sala.Game.PlayedNotes, "-")
+		roundResult := protocolo.RoundResultMessage{
+			PlayedNote:      note,
+			PlayerName:      data.PlayerLogin,
+			CurrentSequence: sequenceStr,
+			AttackTriggered: attackerLogin != "",
+		}
+		gameEnded := false
+		winner := ""
+		if attackerLogin != "" {
+			roundResult.AttackName = attackName
+			roundResult.AttackerName = attackerLogin
+			attackerUser := players[attackerLogin]
+			sala.Game.LastAttacker = attackerUser
+			if attackerLogin == p1.Login {
+				sala.Game.Player1Score++
+			} else {
+				sala.Game.Player2Score++
+			}
+			sala.Game.PlayedNotes = []string{}
+			if sala.Game.Player1Score >= 2 || sala.Game.Player2Score >= 2 {
+				gameEnded = true
+				winner = determineWinnerAndUpdateCoinsFSM(sala, p1, p2)
+			} else {
+				if attackerLogin == p1.Login {
+					sala.Game.CurrentTurn = 1
+				} else {
+					sala.Game.CurrentTurn = 2
+				}
+			}
+		} else {
+			if sala.Game.CurrentTurn == 1 {
+				sala.Game.CurrentTurn = 2
+			} else {
+				sala.Game.CurrentTurn = 1
+			}
+		}
+		fsmResult := map[string]interface{}{
+			"status":      "NotePlayed",
+			"roundResult": roundResult,
+			"nextTurn":    sala.Game.CurrentTurn,
+			"gameEnded":   gameEnded,
+			"p1Login":     p1.Login,
+			"p2Login":     p2.Login,
+		}
+		if gameEnded {
+			fsmResult["status"] = "GameOver"
+			fsmResult["winner"] = winner
+		}
+		logger.Printf("[FSM] Nota %s jogada por %s na sala %s.", note, data.PlayerLogin, sala.ID)
+		return fsmApplyResponse{response: fsmResult}
 
-            return fsmApplyResponse{response: protocolo.TradeResponse{
-                Status:  "OFFER_SENT",
-                Message: fmt.Sprintf("Oferta de troca enviada para %s.", req.Player2Login),
-            }}
-        }
 
 	default:
 		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
@@ -514,6 +655,124 @@ func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 	}
 }
 
+// OUTRAS FUNCOES---
+func findPlayerLoginBySala(sala *Sala, wantPlayer1 bool) string {
+    // Implementando a MELHOR SOLUÇÃO: usa P1Login e P2Login da struct Sala
+    if wantPlayer1 {
+        return sala.P1Login
+    }
+    return sala.P2Login
+}
+
+
+// Versão FSM-safe de checkAttackCompletion. Retorna login do atacante.
+// PRECISA ser chamada com 'mu' bloqueado.
+func checkAttackCompletionFSM(sala *Sala, p1 *User, p2 *User) (string, string) {
+	sequence := strings.Join(sala.Game.PlayedNotes, "")
+	if p1.SelectedInstrument != nil {
+		for _, attack := range p1.SelectedInstrument.Attacks {
+			attackSeq := strings.Join(attack.Sequence, "")
+			if strings.HasSuffix(sequence, attackSeq) {
+				return attack.Name, p1.Login
+			}
+		}
+	}
+	if p2.SelectedInstrument != nil {
+		for _, attack := range p2.SelectedInstrument.Attacks {
+			attackSeq := strings.Join(attack.Sequence, "")
+			if strings.HasSuffix(sequence, attackSeq) {
+				return attack.Name, p2.Login
+			}
+		}
+	}
+	return "", ""
+}
+
+// Função para determinar o vencedor e ATUALIZAR MOEDAS DENTRO DA FSM.
+// PRECISA ser chamada com 'mu' bloqueado.
+func determineWinnerAndUpdateCoinsFSM(sala *Sala, p1 *User, p2 *User) string {
+	game := sala.Game
+	p1CoinsEarned := game.Player1Score * 5
+	p2CoinsEarned := game.Player2Score * 5
+	winner := "EMPATE"
+
+	if game.Player1Score > game.Player2Score {
+		winner = p1.Login
+		p1CoinsEarned += 20
+	} else if game.Player2Score > game.Player1Score {
+		winner = p2.Login
+		p2CoinsEarned += 20
+	}
+
+	p1.Moedas += p1CoinsEarned
+	p2.Moedas += p2CoinsEarned
+
+	logger.Printf("[FSM] Fim de jogo na sala %s. Vencedor: %s. P1 ganhou %d, P2 ganhou %d.", sala.ID, winner, p1CoinsEarned, p2CoinsEarned)
+	sala.Status = "Finished" // Marca a sala como terminada na FSM
+	return winner
+}
+
+// Adicione esta função auxiliar para encaminhamento REST genérico
+func forwardRequestToLeader(endpoint string, payload map[string]interface{}, originalConn net.Conn) {
+	leaderRaftAddr := string(raftNode.Leader())
+	if leaderRaftAddr == "" {
+		sendScreenMsg(originalConn, "Erro interno: líder indisponível.")
+		return
+	}
+	// Converte endereço RAFT (ex: servidor1:12000) para HTTP (ex: servidor1:8090)
+	leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+	logger.Printf(ColorYellow+"Encaminhando requisição para %s no líder %s"+ColorReset, endpoint, leaderHttpAddr)
+
+	postBody, err := json.Marshal(payload)
+    if err != nil {
+         logger.Printf(ColorRed+"Erro ao serializar payload para encaminhamento (%s): %v"+ColorReset, endpoint, err)
+         sendScreenMsg(originalConn, "Erro interno ao preparar requisição.")
+         return
+    }
+
+	reqURL := fmt.Sprintf("http://%s%s", leaderHttpAddr, endpoint)
+
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(postBody))
+
+	if err != nil {
+		logger.Printf(ColorRed+"Erro ao encaminhar para o líder (%s): %v"+ColorReset, endpoint, err)
+		sendScreenMsg(originalConn, "Erro ao contatar o servidor líder.")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Lê a resposta completa do líder
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		 logger.Printf(ColorRed+"Erro ao ler resposta do líder (%s): %v"+ColorReset, endpoint, readErr)
+		 sendScreenMsg(originalConn, "Erro ao ler resposta do líder.")
+		 return
+	}
+
+	// Tenta decodificar a resposta do líder como protocolo.Message e reenvia
+	var leaderMsg protocolo.Message
+	if err := json.Unmarshal(bodyBytes, &leaderMsg); err == nil {
+		 // Reenvia a mensagem completa do líder para o cliente original
+		 sendJSON(originalConn, leaderMsg)
+	} else {
+		 // Se não for uma protocolo.Message, talvez seja um erro HTTP direto?
+		 logger.Printf(ColorYellow+"Resposta não padrão do líder (%s): Status %d, Corpo: %s"+ColorReset, endpoint, resp.StatusCode, string(bodyBytes))
+		 if resp.StatusCode != http.StatusOK {
+			   // Tenta extrair uma mensagem de erro se possível, senão manda genérico
+			   var errorResp struct { Message string } // Tenta formato erro comum
+			   if json.Unmarshal(bodyBytes, &errorResp) == nil && errorResp.Message != "" {
+				    sendScreenMsg(originalConn, fmt.Sprintf("Erro do líder: %s", errorResp.Message))
+			   } else {
+				    sendScreenMsg(originalConn, fmt.Sprintf("Erro %d do servidor líder.", resp.StatusCode))
+			   }
+		 } else {
+			  // Se foi OK mas não Message, algo está estranho. Envia como debug.
+			  sendScreenMsg(originalConn, fmt.Sprintf("[DEBUG] Resposta inesperada do líder: %s", string(bodyBytes)))
+		 }
+	}
+}
+
 // --- FUNÇÕES AUXILIARES ---
 
 func sendJSON(conn net.Conn, msg protocolo.Message) {
@@ -569,272 +828,623 @@ func sendScreenMsg(conn net.Conn, text string) {
 // --- LÓGICA DE SALAS E PAREAMENTO ---
 
 func findRoom(conn net.Conn, mode string, roomCode string) {
-	mu.Lock()
-	defer mu.Unlock()
 	player := findPlayerByConn(conn)
-	if player.SelectedInstrument == nil {
-		sendScreenMsg(conn, "Você precisa selecionar um instrumento para a batalha primeiro!")
+	if player == nil { sendScreenMsg(conn, "Erro: jogador não encontrado."); return }
+	if player.SelectedInstrument == nil { sendScreenMsg(conn, "Selecione um instrumento primeiro!"); return }
+    mu.Lock() // Protege playersInRoom
+	_, inRoom := playersInRoom[player.Login]
+    mu.Unlock()
+	if inRoom { sendScreenMsg(conn, "Você já está em uma sala."); return }
+
+	// --- Lógica Líder/Seguidor ---
+	if raftNode.State() != raft.Leader {
+		// Seguidor: Encaminha para o líder
+		payload := map[string]interface{}{
+			"player_login": player.Login,
+			"mode":         mode,
+			"room_code":    roomCode,
+		}
+		forwardRequestToLeader("/request-find-room", payload, conn)
+	} else {
+		// Líder: Processa a busca/criação/join via RAFT
+		if mode == "PUBLIC" {
+			mu.Lock() // Acesso rápido à lista de espera
+			waitingRoomExists := len(salasEmEspera) > 0
+			var targetRoomID string
+			if waitingRoomExists {
+				targetRoomID = salasEmEspera[0].ID // Pega o ID da primeira sala esperando
+			}
+			mu.Unlock()
+
+			if waitingRoomExists {
+				// Tenta entrar na sala pública existente via RAFT
+				logger.Printf(ColorGreen+"Líder: Jogador %s tentando entrar na sala pública %s"+ColorReset, player.Login, targetRoomID)
+				cmdPayload, _ := json.Marshal(map[string]interface{}{
+					"room_id":      targetRoomID,
+					"player2_login": player.Login,
+				})
+				cmd := []byte("JOIN_ROOM_RAFT:" + string(cmdPayload))
+				applyFuture := raftNode.Apply(cmd, 500*time.Millisecond)
+				handleJoinRoomResult(applyFuture, conn, player, targetRoomID) // Função auxiliar para tratar resultado
+			} else {
+				// Cria uma nova sala pública via RAFT
+				logger.Printf(ColorGreen+"Líder: Jogador %s criando nova sala pública"+ColorReset, player.Login)
+				roomID := randomGenerate(6)
+				cmdPayload, _ := json.Marshal(map[string]interface{}{
+					"room_id":      roomID,
+					"player1_login": player.Login,
+					"is_private":   false,
+				})
+				cmd := []byte("CREATE_ROOM_RAFT:" + string(cmdPayload))
+				applyFuture := raftNode.Apply(cmd, 500*time.Millisecond)
+
+				// Tratar resultado de criação
+				if err := applyFuture.Error(); err != nil { logger.Printf(ColorRed+"Erro RAFT ao criar sala pública para %s: %v"+ColorReset, player.Login, err); sendScreenMsg(conn, "Erro RAFT ao criar sala."); return }
+				fsmResp := applyFuture.Response().(fsmApplyResponse)
+				if fsmResp.err != nil || fsmResp.response != "RoomCreated" { logger.Printf(ColorYellow+"Falha FSM ao criar sala pública para %s: %v %v"+ColorReset, player.Login, fsmResp.err, fsmResp.response); sendScreenMsg(conn, fmt.Sprintf("Erro ao criar sala: %v", fsmResp.response)); return }
+
+				// Associa Conn após FSM confirmar
+				mu.Lock()
+				sala, ok := salas[roomID]
+				if ok { sala.Jogador1 = conn } else { logger.Printf(ColorRed+"Erro CRÍTICO: Sala pública %s criada pela FSM mas não encontrada!"+ColorReset, roomID) }
+				mu.Unlock()
+				sendScreenMsg(conn, "Aguardando outro jogador na sala pública...")
+			}
+		} else if roomCode != "" {
+			// Tenta entrar na sala privada via RAFT
+			logger.Printf(ColorGreen+"Líder: Jogador %s tentando entrar na sala privada %s"+ColorReset, player.Login, roomCode)
+			cmdPayload, _ := json.Marshal(map[string]interface{}{
+				"room_id":      roomCode,
+				"player2_login": player.Login,
+			})
+			cmd := []byte("JOIN_ROOM_RAFT:" + string(cmdPayload))
+			applyFuture := raftNode.Apply(cmd, 500*time.Millisecond)
+			handleJoinRoomResult(applyFuture, conn, player, roomCode) // Mesma função auxiliar
+		} else {
+            // Caso inválido (nem público, nem código)
+             sendScreenMsg(conn, "Requisição de sala inválida.")
+        }
+	}
+}
+
+// Função auxiliar para tratar o resultado do Apply de JOIN_ROOM_RAFT (chamada pelo LÍDER)
+func handleJoinRoomResult(future raft.ApplyFuture, conn net.Conn, player *User, roomID string) {
+	if err := future.Error(); err != nil {
+		logger.Printf(ColorRed+"Erro RAFT ao tentar JOIN_ROOM_RAFT para %s na sala %s: %v"+ColorReset, player.Login, roomID, err)
+		sendScreenMsg(conn, "Erro interno ao entrar na sala (RAFT).")
 		return
 	}
-	if mode == "PUBLIC" {
-		if len(salasEmEspera) > 0 {
-			sala := salasEmEspera[0]
-			salasEmEspera = salasEmEspera[1:]
-			sala.Jogador2 = conn
-			sala.Status = "Em_Jogo"
-			playersInRoom[sala.Jogador1.RemoteAddr().String()] = sala
-			playersInRoom[sala.Jogador2.RemoteAddr().String()] = sala
-			sendPairing(sala.Jogador1)
-			sendPairing(sala.Jogador2)
-			go startGame(sala)
-		} else {
-			codigo := randomGenerate(6)
-			novaSala := &Sala{Jogador1: conn, ID: codigo, Status: "Waiting_Player", IsPrivate: false}
-			salas[codigo] = novaSala
-			salasEmEspera = append(salasEmEspera, novaSala)
-			playersInRoom[conn.RemoteAddr().String()] = novaSala
-		}
-	} else if roomCode != "" {
-		sala, ok := salas[roomCode]
-		if !ok || !sala.IsPrivate || sala.Jogador2 != nil {
-			sendScreenMsg(conn, "Código inválido ou sala cheia.")
-			return
-		}
-		sala.Jogador2 = conn
-		sala.Status = "Em_Jogo"
-		playersInRoom[sala.Jogador1.RemoteAddr().String()] = sala
-		playersInRoom[sala.Jogador2.RemoteAddr().String()] = sala
-		sendPairing(sala.Jogador1)
-		sendPairing(sala.Jogador2)
-		go startGame(sala)
+	fsmResp := future.Response().(fsmApplyResponse)
+	if fsmResp.err != nil {
+        logger.Printf(ColorRed+"Erro FSM ao tentar JOIN_ROOM_RAFT para %s na sala %s: %v"+ColorReset, player.Login, roomID, fsmResp.err)
+		sendScreenMsg(conn, fmt.Sprintf("Erro FSM ao entrar na sala: %v", fsmResp.err))
+		return
 	}
+
+	// Verifica a resposta da FSM
+	switch result := fsmResp.response.(type) {
+	case string: // Erro de negócio (ex: "RoomNotFound", "PlayerInRoom", "RoomNotWaiting")
+         logger.Printf(ColorYellow+"Falha FSM ao tentar JOIN_ROOM_RAFT para %s na sala %s: %s"+ColorReset, player.Login, roomID, result)
+		 sendScreenMsg(conn, fmt.Sprintf("Não foi possível entrar na sala: %s", result))
+	case map[string]string: // Sucesso - Jogo Iniciado
+		if status, ok := result["status"]; ok && status == "GameStarted" {
+			p1Login := result["p1Login"]
+			p2Login := result["p2Login"]
+			logger.Printf(ColorGreen+"JOIN_ROOM_RAFT sucedido para %s na sala %s (P1: %s, P2: %s)."+ColorReset, player.Login, roomID, p1Login, p2Login)
+
+			// Líder associa as conexões (estado volátil) APÓS FSM confirmar
+			mu.Lock()
+			sala, exists := salas[roomID]
+            p1, p1ok := players[p1Login] // Busca P1 para pegar Conn
+            p2, p2ok := players[p2Login] // Busca P2 para pegar Conn
+
+			if exists {
+                 // Associa/Confirma as conexões reais aos slots da sala
+				 if sala.P1Login == p1Login && p1ok && p1.Online { sala.Jogador1 = p1.Conn }
+                 if sala.P2Login == p2Login && p2ok && p2.Online { sala.Jogador2 = p2.Conn }
+
+				 // Encontra a conexão do OUTRO jogador (pode ser nil se ele estiver em outro nó)
+				 otherPlayerConn := net.Conn(nil)
+				 if player.Login == p1Login && p2ok && p2.Online { // Se eu sou P1, notifica P2 se ele estiver local
+					 otherPlayerConn = p2.Conn
+				 } else if player.Login == p2Login && p1ok && p1.Online { // Se eu sou P2, notifica P1 se ele estiver local
+                     otherPlayerConn = p1.Conn
+                 }
+
+				// Envia PAREADO para o jogador ATUAL (que fez a requisição)
+                // Usamos o login da FSM para garantir consistência
+				sendPairing(conn, player.Login, roomID)
+
+                // Envia PAREADO para o OUTRO jogador SE ele estiver conectado a ESTE líder
+                if otherPlayerConn != nil {
+                     otherLogin := ""
+                     if player.Login == p1Login { otherLogin = p2Login } else { otherLogin = p1Login }
+                     sendPairing(otherPlayerConn, otherLogin, roomID)
+                } else {
+                     // Se o outro jogador não está aqui, o broadcast fará o trabalho
+                     otherLogin := ""
+                      if player.Login == p1Login { otherLogin = p2Login } else { otherLogin = p1Login }
+                      otherPairingMsg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: roomID, PlayerLogin: otherLogin}}
+                      broadcastNotificationToPlayer(otherLogin, otherPairingMsg) // Pede aos outros nós para enviarem PAREADO
+                }
+
+				// Inicia o jogo e envia MQTTs (somente o líder faz isso)
+				// É importante iniciar DEPOIS de enviar PAREADO
+				go startGameAndNotify(sala)
+
+			} else {
+                 logger.Printf(ColorRed+"Erro CRÍTICO: Sala %s iniciada pela FSM mas não encontrada localmente!"+ColorReset, roomID)
+            }
+			mu.Unlock()
+		} else {
+            logger.Printf(ColorRed+"Erro: Resposta inesperada da FSM para JOIN_ROOM_RAFT: %v"+ColorReset, result)
+			sendScreenMsg(conn, "Resposta inesperada do servidor ao entrar na sala.")
+		}
+	default:
+         logger.Printf(ColorRed+"Erro: Resposta desconhecida da FSM para JOIN_ROOM_RAFT: %v"+ColorReset, fsmResp.response)
+		 sendScreenMsg(conn, "Resposta desconhecida do servidor ao entrar na sala.")
+	}
+}
+
+// handleJoinRoomResultREST (Nova função para a API REST)
+// Trata o resultado do Apply de JOIN_ROOM_RAFT vindo de um seguidor (via HTTP)
+func handleJoinRoomResultREST(future raft.ApplyFuture, w http.ResponseWriter, playerLogin string, roomID string) {
+	if err := future.Error(); err != nil {
+		logger.Printf(ColorRed+"[API REST] Erro RAFT ao tentar JOIN_ROOM_RAFT para %s na sala %s: %v"+ColorReset, playerLogin, roomID, err)
+		http.Error(w, "Erro interno ao entrar na sala (RAFT).", http.StatusInternalServerError)
+		return
+	}
+	fsmResp := future.Response().(fsmApplyResponse)
+	if fsmResp.err != nil {
+		logger.Printf(ColorRed+"[API REST] Erro FSM ao tentar JOIN_ROOM_RAFT para %s na sala %s: %v"+ColorReset, playerLogin, roomID, fsmResp.err)
+		http.Error(w, fmt.Sprintf("Erro FSM ao entrar na sala: %v", fsmResp.err), http.StatusInternalServerError)
+		return
+	}
+
+	// Prepara a resposta HTTP
+	w.Header().Set("Content-Type", "application/json")
+
+	switch result := fsmResp.response.(type) {
+	case string: // Erro de negócio (ex: "RoomNotFound", "PlayerInRoom", "RoomNotWaiting")
+		logger.Printf(ColorYellow+"[API REST] Falha FSM ao tentar JOIN_ROOM_RAFT para %s na sala %s: %s"+ColorReset, playerLogin, roomID, result)
+		// Retorna um erro HTTP 400 (Bad Request) com a mensagem
+		w.WriteHeader(http.StatusBadRequest)
+		// Envia a mesma estrutura de mensagem que o cliente esperaria
+		respMsg := protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: fmt.Sprintf("Não foi possível entrar na sala: %s", result)}}
+		json.NewEncoder(w).Encode(respMsg)
+
+	case map[string]string: // Sucesso - Jogo Iniciado
+		if status, ok := result["status"]; ok && status == "GameStarted" {
+			p1Login := result["p1Login"]
+			p2Login := result["p2Login"]
+			logger.Printf(ColorGreen+"[API REST] JOIN_ROOM_RAFT sucedido para %s na sala %s (P1: %s, P2: %s)."+ColorReset, playerLogin, roomID, p1Login, p2Login)
+
+			// Lógica do Líder (quase idêntica a handleJoinRoomResult)
+			mu.Lock()
+			sala, exists := salas[roomID]
+			p1, p1ok := players[p1Login] // Busca P1
+			p2, p2ok := players[p2Login] // Busca P2
+
+			if exists {
+				// Encontra a conexão do OUTRO jogador (pode ser nil se ele estiver em outro nó)
+				otherPlayerConn := net.Conn(nil)
+				var otherLogin string
+
+				if playerLogin == p1Login { // Se eu (requisitante HTTP) sou P1
+					otherLogin = p2Login
+					if p2ok && p2.Online {
+						otherPlayerConn = p2.Conn
+					}
+				} else { // Se eu (requisitante HTTP) sou P2
+					otherLogin = p1Login
+					if p1ok && p1.Online {
+						otherPlayerConn = p1.Conn
+					}
+				}
+
+				// Envia PAREADO para o OUTRO jogador SE ele estiver conectado a ESTE líder
+				if otherPlayerConn != nil {
+					sendPairing(otherPlayerConn, otherLogin, roomID)
+				} else {
+					// Se o outro jogador não está aqui, o broadcast fará o trabalho
+					otherPairingMsg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: roomID, PlayerLogin: otherLogin}}
+					broadcastNotificationToPlayer(otherLogin, otherPairingMsg)
+				}
+
+				// Inicia o jogo e envia MQTTs (somente o líder faz isso)
+				go startGameAndNotify(sala)
+
+			} else {
+				logger.Printf(ColorRed+"[API REST] Erro CRÍTICO: Sala %s iniciada pela FSM mas não encontrada localmente!"+ColorReset, roomID)
+			}
+			mu.Unlock()
+
+			// Responde PAREADO para o jogador ATUAL (que fez a requisição HTTP)
+			w.WriteHeader(http.StatusOK)
+			respMsg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: roomID, PlayerLogin: playerLogin}}
+			json.NewEncoder(w).Encode(respMsg)
+
+		} else {
+			logger.Printf(ColorRed+"[API REST] Erro: Resposta inesperada da FSM para JOIN_ROOM_RAFT: %v"+ColorReset, result)
+			http.Error(w, "Resposta inesperada do servidor ao entrar na sala.", http.StatusInternalServerError)
+		}
+	default:
+		logger.Printf(ColorRed+"[API REST] Erro: Resposta desconhecida da FSM para JOIN_ROOM_RAFT: %v"+ColorReset, fsmResp.response)
+		http.Error(w, "Resposta desconhecida do servidor ao entrar na sala.", http.StatusInternalServerError)
+	}
+}
+
+// Nova função para iniciar o jogo e enviar MQTTs (chamada pelo LÍDER)
+func startGameAndNotify(sala *Sala) {
+	if raftNode.State() != raft.Leader { return } // Apenas o líder notifica via MQTT
+
+	// A FSM já inicializou sala.Game. Apenas lemos os dados necessários.
+	mu.Lock() // Protege acesso a sala, players
+	p1Login := sala.P1Login
+	p2Login := sala.P2Login
+    salaID := sala.ID
+    currentTurn := 0 // Default
+    if sala.Game != nil { // Checa se Game foi inicializado
+        currentTurn = sala.Game.CurrentTurn
+    }
+	mu.Unlock()
+
+    if p1Login == "" || p2Login == "" {
+         logger.Printf(ColorRed+"Erro ao notificar início de jogo: Logins P1/P2 não encontrados na sala %s"+ColorReset, salaID)
+         return
+    }
+    if currentTurn == 0 {
+        logger.Printf(ColorRed+"Erro ao notificar início de jogo: Estado do jogo não inicializado na sala %s"+ColorReset, salaID)
+        return
+    }
+
+
+	logger.Printf(ColorGreen+"Líder: Enviando notificações de início de jogo para sala %s (P1: %s, P2: %s)"+ColorReset, salaID, p1Login, p2Login)
+
+	// Envia GAME_START via MQTT
+	publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2Login}})
+	publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1Login}})
+
+	time.Sleep(1 * time.Second) // Pequena pausa
+
+	// Envia primeiro TURN_UPDATE via MQTT
+	publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 1}})
+	publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 2}})
+}
+
+// Pequena Modificação em sendPairing para receber login e roomID
+func sendPairing(conn net.Conn, playerLogin string, roomID string) {
+    if conn == nil { return } // Checagem extra
+    msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: roomID, PlayerLogin: playerLogin}}
+    sendJSON(conn, msg)
 }
 
 func createRoom(conn net.Conn) {
-	mu.Lock()
-	defer mu.Unlock()
 	player := findPlayerByConn(conn)
+	if player == nil {
+		sendScreenMsg(conn, "Erro: jogador não encontrado.")
+		return
+	}
 	if player.SelectedInstrument == nil {
 		sendScreenMsg(conn, "Você precisa selecionar um instrumento para a batalha primeiro!")
 		return
 	}
-	codigo := randomGenerate(6)
-	novaSala := &Sala{Jogador1: conn, ID: codigo, Status: "Waiting_Player", IsPrivate: true}
-	salas[codigo] = novaSala
-	playersInRoom[conn.RemoteAddr().String()] = novaSala
-	sendScreenMsg(conn, "Sala privada criada. Código: "+codigo)
+    // Verifica se já está em sala (Leitura rápida antes de encaminhar)
+    mu.Lock()
+	_, inRoom := playersInRoom[player.Login]
+    mu.Unlock()
+	if inRoom {
+		sendScreenMsg(conn, "Você já está em uma sala.")
+		return
+	}
+
+	// --- Lógica Líder/Seguidor ---
+	if raftNode.State() != raft.Leader {
+		// Seguidor: Encaminha para o líder via REST
+		forwardRequestToLeader("/request-create-room", map[string]interface{}{"player_login": player.Login}, conn)
+	} else {
+		// Líder: Gera ID e aplica no RAFT
+		roomID := randomGenerate(6) // Líder gera o ID não determinístico globalmente
+		cmdPayload, _ := json.Marshal(map[string]interface{}{
+			"room_id":      roomID,
+			"player1_login": player.Login,
+			"is_private":   true, // createRoom é sempre privado
+		})
+		cmd := []byte("CREATE_ROOM_RAFT:" + string(cmdPayload))
+
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"Erro RAFT ao criar sala para %s: %v"+ColorReset, player.Login, err)
+			sendScreenMsg(conn, "Erro interno ao criar sala (RAFT).")
+			return
+		}
+		// A FSM retorna "RoomCreated", "PlayerNotFound", ou "PlayerInRoom"
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+             logger.Printf(ColorRed+"Erro FSM ao criar sala para %s: %v"+ColorReset, player.Login, fsmResp.err)
+			 sendScreenMsg(conn, fmt.Sprintf("Erro FSM ao criar sala: %v", fsmResp.err))
+             return
+        }
+        if fsmResp.response != "RoomCreated" {
+             logger.Printf(ColorYellow+"Falha FSM ao criar sala para %s: %v"+ColorReset, player.Login, fsmResp.response)
+			 sendScreenMsg(conn, fmt.Sprintf("Não foi possível criar sala: %s", fsmResp.response)) // Ex: "Jogador já está em sala"
+             return
+		}
+
+		// Sucesso: Associa Conn (estado volátil) APÓS FSM confirmar
+		mu.Lock()
+		sala, ok := salas[roomID]
+		if ok {
+            sala.Jogador1 = conn // Associa a conexão real
+             // Adiciona P1Login aqui também, embora FSM já tenha feito, para consistência local imediata?
+             // sala.P1Login = player.Login // Já feito na FSM
+        } else {
+             logger.Printf(ColorRed+"Erro CRÍTICO: Sala %s criada pela FSM mas não encontrada localmente!"+ColorReset, roomID)
+        }
+		mu.Unlock()
+		sendScreenMsg(conn, "Sala privada criada. Código: "+roomID)
+	}
 }
 
-func sendPairing(conn net.Conn) {
-	p := findPlayerByConn(conn)
-	sala := playersInRoom[conn.RemoteAddr().String()]
-	msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: sala.ID, PlayerLogin: p.Login}}
-	sendJSON(conn, msg)
-}
+// func sendPairing(conn net.Conn) {
+// 	p := findPlayerByConn(conn)
+// 	sala := playersInRoom[conn.RemoteAddr().String()]
+// 	msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: sala.ID, PlayerLogin: p.Login}}
+// 	sendJSON(conn, msg)
+// }
 
 // --- LÓGICA DO JOGO MUSICAL ---
 
-func startGame(sala *Sala) {
-	p1 := findPlayerByConn(sala.Jogador1)
-	p2 := findPlayerByConn(sala.Jogador2)
-	if p1 == nil || p2 == nil {
-		return
-	}
+// func startGame(sala *Sala) {
+// 	p1 := findPlayerByConn(sala.Jogador1)
+// 	p2 := findPlayerByConn(sala.Jogador2)
+// 	if p1 == nil || p2 == nil {
+// 		return
+// 	}
 
-	sala.Game = &GameState{
-		CurrentTurn: 1,
-	}
+// 	sala.Game = &GameState{
+// 		CurrentTurn: 1,
+// 	}
 
-	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
-	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
+// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
+// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
 
-	time.Sleep(1 * time.Second)
-	notifyTurn(sala)
-}
+// 	time.Sleep(1 * time.Second)
+// 	notifyTurn(sala)
+// }
 
-func notifyTurn(sala *Sala) {
-	p1 := findPlayerByConn(sala.Jogador1)
-	p2 := findPlayerByConn(sala.Jogador2)
-	if p1 == nil || p2 == nil {
-		return
-	}
+// func notifyTurn(sala *Sala) {
+// 	p1 := findPlayerByConn(sala.Jogador1)
+// 	p2 := findPlayerByConn(sala.Jogador2)
+// 	if p1 == nil || p2 == nil {
+// 		return
+// 	}
 
-	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 1}})
-	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 2}})
-}
+// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 1}})
+// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 2}})
+// }
 
+// Porteiro para PLAY_NOTE
 func handlePlayNote(conn net.Conn, data interface{}) {
-	var req protocolo.PlayNoteRequest
-	mapToStruct(data, &req)
+    var req protocolo.PlayNoteRequest
+    if err := mapToStruct(data, &req); err != nil { // Pega a nota
+         sendScreenMsg(conn, "Formato de nota inválido.")
+         return
+    }
 
-	mu.Lock()
-	sala, ok := playersInRoom[conn.RemoteAddr().String()]
-	mu.Unlock()
+    player := findPlayerByConn(conn)
+    if player == nil { sendScreenMsg(conn, "Erro: jogador não encontrado."); return }
 
-	if !ok || sala.Game == nil {
-		sendScreenMsg(conn, "Você não está em um jogo ativo.")
-		return
-	}
+    // Validação rápida (está em jogo?) - A FSM fará a validação final
+    mu.Lock() // Protege playersInRoom
+    _, inRoom := playersInRoom[player.Login]
+    mu.Unlock()
+    if !inRoom {
+        sendScreenMsg(conn, "Você não está em um jogo ativo.")
+        return
+    }
 
-	sala.Game.GameMutex.Lock()
-	defer sala.Game.GameMutex.Unlock()
+    // --- Lógica Líder/Seguidor ---
+    if raftNode.State() != raft.Leader {
+        // Seguidor: Encaminha para o líder
+        payload := map[string]interface{}{
+            "player_login": player.Login,
+            "note":         req.Note,
+        }
+        forwardRequestToLeader("/request-play-note", payload, conn)
+    } else {
+        // Líder: Aplica no RAFT
+        cmdPayload, _ := json.Marshal(map[string]interface{}{
+            "player_login": player.Login,
+            "note":         req.Note,
+        })
+        cmd := []byte("PLAY_NOTE_RAFT:" + string(cmdPayload))
 
-	p := findPlayerByConn(conn)
-	isPlayer1 := conn == sala.Jogador1
-	playerNum := 2
-	if isPlayer1 {
-		playerNum = 1
-	}
+        future := raftNode.Apply(cmd, 500*time.Millisecond)
+        if err := future.Error(); err != nil {
+            logger.Printf(ColorRed+"Erro RAFT ao jogar nota por %s: %v"+ColorReset, player.Login, err)
+            sendScreenMsg(conn, "Erro interno ao jogar nota (RAFT).")
+            return
+        }
+        fsmResp := future.Response().(fsmApplyResponse)
+         if fsmResp.err != nil {
+             logger.Printf(ColorRed+"Erro FSM ao jogar nota por %s: %v"+ColorReset, player.Login, fsmResp.err)
+             sendScreenMsg(conn, fmt.Sprintf("Erro FSM ao jogar nota: %v", fsmResp.err))
+             return
+         }
 
-	if sala.Game.CurrentTurn != playerNum {
-		sendScreenMsg(conn, "Não é a sua vez!")
-		return
-	}
+        // Processa o resultado da FSM
+        switch resultData := fsmResp.response.(type) {
+        case string: // Erro de negócio (ex: "NotInGame", "NotYourTurn", "InvalidNote")
+             logger.Printf(ColorYellow+"Falha FSM ao jogar nota por %s: %s"+ColorReset, player.Login, resultData)
+             sendScreenMsg(conn, fmt.Sprintf("Não foi possível jogar: %s", resultData))
+        case map[string]interface{}: // Sucesso (NotePlayed ou GameOver)
+             // Líder envia atualizações MQTT
+             p1Login := resultData["p1Login"].(string)
+             p2Login := resultData["p2Login"].(string)
+             salaID := ""
+             mu.Lock() // Protege playersInRoom e salas
+             sala, ok := playersInRoom[player.Login] // Pode ser P1 ou P2
+             if ok && sala != nil { salaID = sala.ID }
+             // Pega pontuações atuais para mensagens MQTT
+             currentP1Score, currentP2Score := 0, 0
+             if ok && sala != nil && sala.Game != nil {
+                 currentP1Score = sala.Game.Player1Score
+                 currentP2Score = sala.Game.Player2Score
+             }
+             mu.Unlock()
 
-	validNotes := "ABCDEFG"
-	note := strings.ToUpper(req.Note)
-	if len(note) != 1 || !strings.Contains(validNotes, note) {
-		sendScreenMsg(conn, "Nota inválida! Use A, B, C, D, E, F ou G.")
-		return
-	}
+             if salaID == "" { logger.Printf(ColorRed+"Erro CRÍTICO: Sala não encontrada para %s ao processar nota."+ColorReset, player.Login); return }
 
-	sala.Game.PlayedNotes = append(sala.Game.PlayedNotes, note)
+             // Envia ROUND_RESULT via MQTT
+             if roundResultData, ok := resultData["roundResult"]; ok {
+                  var roundResult protocolo.RoundResultMessage
+                  mapToStruct(roundResultData, &roundResult)
 
-	p1 := findPlayerByConn(sala.Jogador1)
-	p2 := findPlayerByConn(sala.Jogador2)
+                  resultMsgP1 := roundResult
+                  resultMsgP1.YourScore = currentP1Score // Usa pontuação lida
+                  resultMsgP1.OpponentScore = currentP2Score
+                  publishToPlayer(salaID, p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
 
-	attackName, attacker := checkAttackCompletion(sala)
-	sequenceStr := strings.Join(sala.Game.PlayedNotes, "-")
+                  resultMsgP2 := roundResult
+                  resultMsgP2.YourScore = currentP2Score // Usa pontuação lida
+                  resultMsgP2.OpponentScore = currentP1Score
+                  publishToPlayer(salaID, p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
+             }
 
-	resultMsgBase := protocolo.RoundResultMessage{
-		PlayedNote:      note,
-		PlayerName:      p.Login,
-		CurrentSequence: sequenceStr,
-		AttackTriggered: attacker != nil,
-	}
+             // Verifica se o jogo acabou
+             if gameEnded, _ := resultData["gameEnded"].(bool); gameEnded {
+                 winner := resultData["winner"].(string)
+                 mu.Lock() // Protege players para recalcular moedas ganhas
+                 finalP1Score, finalP2Score := 0, 0
+                 // Busca sala novamente para garantir que ainda existe
+                 sala, salaOk := salas[salaID]
+                 if salaOk && sala != nil && sala.Game != nil {
+                    finalP1Score = sala.Game.Player1Score
+                    finalP2Score = sala.Game.Player2Score
+                 }
+                 mu.Unlock() // Desbloqueia antes de calcular
 
-	if attacker != nil {
-		resultMsgBase.AttackName = attackName
-		resultMsgBase.AttackerName = attacker.Login
-		if attacker == p1 {
-			sala.Game.Player1Score++
-		} else {
-			sala.Game.Player2Score++
-		}
-		sala.Game.PlayedNotes = []string{}
-		sala.Game.LastAttacker = attacker
-	}
+                 // Recalcula moedas ganhas baseado na pontuação final
+                 p1CoinsEarned := finalP1Score*5 + (func() int { if winner == p1Login { return 20 }; return 0 }())
+                 p2CoinsEarned := finalP2Score*5 + (func() int { if winner == p2Login { return 20 }; return 0 }())
 
-	resultMsgP1 := resultMsgBase
-	resultMsgP1.YourScore = sala.Game.Player1Score
-	resultMsgP1.OpponentScore = sala.Game.Player2Score
-	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
+                 // Envia GAME_OVER via MQTT
+                  gameOverMsgP1 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p1CoinsEarned }
+                  publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+                  gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
+                  publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
 
-	resultMsgP2 := resultMsgBase
-	resultMsgP2.YourScore = sala.Game.Player2Score
-	resultMsgP2.OpponentScore = sala.Game.Player1Score
-	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
+                  // Líder limpa o estado da sala (fora da FSM, após notificações)
+                  mu.Lock()
+                  delete(playersInRoom, p1Login)
+                  delete(playersInRoom, p2Login)
+                  delete(salas, salaID)
+                  mu.Unlock()
+                  logger.Printf(ColorGreen+"Jogo na sala %s finalizado pelo líder."+ColorReset, salaID)
 
-	if sala.Game.Player1Score >= 2 || sala.Game.Player2Score >= 2 {
-		endGame(sala)
-		return
-	}
-
-	if attacker != nil {
-		if attacker == p1 {
-			sala.Game.CurrentTurn = 1
-		} else {
-			sala.Game.CurrentTurn = 2
-		}
-	} else {
-		if sala.Game.CurrentTurn == 1 {
-			sala.Game.CurrentTurn = 2
-		} else {
-			sala.Game.CurrentTurn = 1
-		}
-	}
-
-	time.Sleep(500 * time.Millisecond)
-	notifyTurn(sala)
+             } else {
+                  // Envia TURN_UPDATE via MQTT
+                  // Certifique-se de que nextTurn é tratado como float64 vindo do JSON/map
+                  // --- CORRIGIDO ---
+				nextTurnPlayerInt, ok := resultData["nextTurn"].(int)
+				if !ok {
+					// Se não for int, TENTA float64 (para o caso de vir de um JSON)
+					if nextTurnPlayerFloat, okFloat := resultData["nextTurn"].(float64); okFloat {
+						nextTurnPlayerInt = int(nextTurnPlayerFloat)
+					} else {
+						logger.Printf(ColorRed+"Erro CRÍTICO: 'nextTurn' não é nem int nem float64 no resultado da FSM. Tipo: %T"+ColorReset, resultData["nextTurn"])
+						return
+					}
+				}
+				nextTurnPlayer := nextTurnPlayerInt
+                publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
+                publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
+             }
+        default:
+            logger.Printf(ColorRed+"Erro: Resposta desconhecida da FSM para PLAY_NOTE_RAFT: %v"+ColorReset, fsmResp.response)
+            sendScreenMsg(conn, "Erro inesperado ao processar nota.")
+        }
+    }
 }
 
-func checkAttackCompletion(sala *Sala) (string, *User) {
-	p1 := findPlayerByConn(sala.Jogador1)
-	p2 := findPlayerByConn(sala.Jogador2)
-	sequence := strings.Join(sala.Game.PlayedNotes, "")
+// func checkAttackCompletion(sala *Sala) (string, *User) {
+// 	p1 := findPlayerByConn(sala.Jogador1)
+// 	p2 := findPlayerByConn(sala.Jogador2)
+// 	sequence := strings.Join(sala.Game.PlayedNotes, "")
 
-	if p1.SelectedInstrument != nil {
-		for _, attack := range p1.SelectedInstrument.Attacks {
-			attackSeq := strings.Join(attack.Sequence, "")
-			if strings.HasSuffix(sequence, attackSeq) {
-				return attack.Name, p1
-			}
-		}
-	}
-	if p2.SelectedInstrument != nil {
-		for _, attack := range p2.SelectedInstrument.Attacks {
-			attackSeq := strings.Join(attack.Sequence, "")
-			if strings.HasSuffix(sequence, attackSeq) {
-				return attack.Name, p2
-			}
-		}
-	}
-	return "", nil
-}
+// 	if p1.SelectedInstrument != nil {
+// 		for _, attack := range p1.SelectedInstrument.Attacks {
+// 			attackSeq := strings.Join(attack.Sequence, "")
+// 			if strings.HasSuffix(sequence, attackSeq) {
+// 				return attack.Name, p1
+// 			}
+// 		}
+// 	}
+// 	if p2.SelectedInstrument != nil {
+// 		for _, attack := range p2.SelectedInstrument.Attacks {
+// 			attackSeq := strings.Join(attack.Sequence, "")
+// 			if strings.HasSuffix(sequence, attackSeq) {
+// 				return attack.Name, p2
+// 			}
+// 		}
+// 	}
+// 	return "", nil
+// }
 
-func endGame(sala *Sala) {
-	game := sala.Game
-	p1 := findPlayerByConn(sala.Jogador1)
-	p2 := findPlayerByConn(sala.Jogador2)
+// func endGame(sala *Sala) {
+// 	game := sala.Game
+// 	p1 := findPlayerByConn(sala.Jogador1)
+// 	p2 := findPlayerByConn(sala.Jogador2)
 
-	p1.Moedas += game.Player1Score * 5
-	p2.Moedas += game.Player2Score * 5
+// 	p1.Moedas += game.Player1Score * 5
+// 	p2.Moedas += game.Player2Score * 5
 
-	var winner string
-	if game.Player1Score > game.Player2Score {
-		winner = p1.Login
-		p1.Moedas += 20
-	} else if game.Player2Score > game.Player1Score {
-		winner = p2.Login
-		p2.Moedas += 20
-	} else {
-		winner = "EMPATE"
-	}
+// 	var winner string
+// 	if game.Player1Score > game.Player2Score {
+// 		winner = p1.Login
+// 		p1.Moedas += 20
+// 	} else if game.Player2Score > game.Player1Score {
+// 		winner = p2.Login
+// 		p2.Moedas += 20
+// 	} else {
+// 		winner = "EMPATE"
+// 	}
 
-	gameOverMsgP1 := protocolo.GameOverMessage{
-		Winner:       winner,
-		FinalScoreP1: game.Player1Score,
-		FinalScoreP2: game.Player2Score,
-		CoinsEarned: game.Player1Score*5 + (func() int {
-			if winner == p1.Login {
-				return 20
-			}
-			return 0
-		}()),
-	}
-	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+// 	gameOverMsgP1 := protocolo.GameOverMessage{
+// 		Winner:       winner,
+// 		FinalScoreP1: game.Player1Score,
+// 		FinalScoreP2: game.Player2Score,
+// 		CoinsEarned: game.Player1Score*5 + (func() int {
+// 			if winner == p1.Login {
+// 				return 20
+// 			}
+// 			return 0
+// 		}()),
+// 	}
+// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
 
-	gameOverMsgP2 := protocolo.GameOverMessage{
-		Winner:       winner,
-		FinalScoreP1: game.Player1Score,
-		FinalScoreP2: game.Player2Score,
-		CoinsEarned: game.Player2Score*5 + (func() int {
-			if winner == p2.Login {
-				return 20
-			}
-			return 0
-		}()),
-	}
-	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
+// 	gameOverMsgP2 := protocolo.GameOverMessage{
+// 		Winner:       winner,
+// 		FinalScoreP1: game.Player1Score,
+// 		FinalScoreP2: game.Player2Score,
+// 		CoinsEarned: game.Player2Score*5 + (func() int {
+// 			if winner == p2.Login {
+// 				return 20
+// 			}
+// 			return 0
+// 		}()),
+// 	}
+// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
 
-	mu.Lock()
-	delete(playersInRoom, sala.Jogador1.RemoteAddr().String())
-	if sala.Jogador2 != nil {
-		delete(playersInRoom, sala.Jogador2.RemoteAddr().String())
-	}
-	delete(salas, sala.ID)
-	mu.Unlock()
-}
+// 	mu.Lock()
+// 	delete(playersInRoom, sala.Jogador1.RemoteAddr().String())
+// 	if sala.Jogador2 != nil {
+// 		delete(playersInRoom, sala.Jogador2.RemoteAddr().String())
+// 	}
+// 	delete(salas, sala.ID)
+// 	mu.Unlock()
+// }
 
 // --- LÓGICA DE PACOTES E INSTRUMENTOS ---
 
@@ -1529,6 +2139,206 @@ func startHttpApi(nodeID string, httpAddr string) {
         mu.Unlock()
     })
 
+	mux.HandleFunc("/request-create-room", func(w http.ResponseWriter, r *http.Request) {
+        if raftNode.State() != raft.Leader { http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable); return }
+        var reqBody map[string]interface{}
+        if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil { http.Error(w, "Corpo inválido", http.StatusBadRequest); return }
+        playerLogin, _ := reqBody["player_login"].(string)
+        if playerLogin == "" { http.Error(w, "Missing player_login", http.StatusBadRequest); return }
+
+        logger.Printf(ColorCyan+"[API REST] Recebido pedido para criar sala para %s"+ColorReset, playerLogin)
+
+        // Líder gera ID e aplica RAFT
+         roomID := randomGenerate(6)
+         cmdPayload, _ := json.Marshal(map[string]interface{}{
+             "room_id":      roomID,
+             "player1_login": playerLogin,
+             "is_private":   true, // /request-create-room é sempre privado
+         })
+         cmd := []byte("CREATE_ROOM_RAFT:" + string(cmdPayload))
+         future := raftNode.Apply(cmd, 500*time.Millisecond)
+
+         if err := future.Error(); err != nil {
+              http.Error(w, "Erro interno RAFT", http.StatusInternalServerError)
+              return
+         }
+          fsmResp := future.Response().(fsmApplyResponse)
+          if fsmResp.err != nil {
+               http.Error(w, fmt.Sprintf("Erro FSM: %v", fsmResp.err), http.StatusInternalServerError)
+               return
+          }
+          if fsmResp.response != "RoomCreated" {
+                http.Error(w, fmt.Sprintf("Não foi possível criar sala: %s", fsmResp.response), http.StatusBadRequest)
+               return
+          }
+
+         // Sucesso: Retorna a mensagem que o cliente espera
+         w.Header().Set("Content-Type", "application/json")
+         w.WriteHeader(http.StatusOK)
+         respMsg := protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: "Sala privada criada. Código: "+roomID}}
+         json.NewEncoder(w).Encode(respMsg)
+    })
+
+     mux.HandleFunc("/request-find-room", func(w http.ResponseWriter, r *http.Request) {
+         if raftNode.State() != raft.Leader { http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable); return }
+         var reqBody map[string]interface{}
+         if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil { http.Error(w, "Corpo inválido", http.StatusBadRequest); return }
+         playerLogin, _ := reqBody["player_login"].(string)
+         mode, _ := reqBody["mode"].(string)
+         roomCode, _ := reqBody["room_code"].(string)
+         if playerLogin == "" { http.Error(w, "Missing player_login", http.StatusBadRequest); return }
+
+         logger.Printf(ColorCyan+"[API REST] Recebido pedido para encontrar sala para %s (Modo: %s, Código: %s)"+ColorReset, playerLogin, mode, roomCode)
+
+         // Lógica do Líder (similar a findRoom, mas aplica RAFT)
+         var applyFuture raft.ApplyFuture
+         targetRoomID := "" // Usado para handleJoinRoomResultREST
+
+          if mode == "PUBLIC" {
+              mu.Lock()
+              waitingRoomExists := len(salasEmEspera) > 0
+              if waitingRoomExists { targetRoomID = salasEmEspera[0].ID }
+              mu.Unlock()
+
+              if waitingRoomExists {
+                   cmdPayload, _ := json.Marshal(map[string]interface{}{ "room_id": targetRoomID, "player2_login": playerLogin})
+                   cmd := []byte("JOIN_ROOM_RAFT:" + string(cmdPayload))
+                   applyFuture = raftNode.Apply(cmd, 500*time.Millisecond)
+              } else {
+                   roomID := randomGenerate(6)
+                   targetRoomID = roomID
+                   cmdPayload, _ := json.Marshal(map[string]interface{}{ "room_id": roomID, "player1_login": playerLogin, "is_private": false})
+                   cmd := []byte("CREATE_ROOM_RAFT:" + string(cmdPayload))
+                   applyFuture = raftNode.Apply(cmd, 500*time.Millisecond)
+
+                   // Tratamento especial para criação de sala pública (resposta imediata)
+                    if err := applyFuture.Error(); err != nil { http.Error(w, "Erro RAFT", 500); return }
+                    fsmResp := applyFuture.Response().(fsmApplyResponse)
+                    if fsmResp.err != nil { http.Error(w, fmt.Sprintf("Erro FSM: %v", fsmResp.err), 500); return }
+                    if fsmResp.response != "RoomCreated" { http.Error(w, fmt.Sprintf("Não foi possível criar sala: %s", fsmResp.response), 400); return }
+
+                    // Resposta para sala pública criada (cliente fica esperando)
+                    respMsg := protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: "Aguardando outro jogador na sala pública..."}}
+                    w.Header().Set("Content-Type", "application/json")
+                    json.NewEncoder(w).Encode(respMsg)
+                    return // Encerra aqui para criação pública
+              }
+          } else if roomCode != "" {
+                targetRoomID = roomCode
+                cmdPayload, _ := json.Marshal(map[string]interface{}{ "room_id": roomCode, "player2_login": playerLogin})
+                cmd := []byte("JOIN_ROOM_RAFT:" + string(cmdPayload))
+                applyFuture = raftNode.Apply(cmd, 500*time.Millisecond)
+          } else {
+               http.Error(w, "Modo ou código inválido", http.StatusBadRequest)
+               return
+          }
+
+         // Trata o resultado do JOIN (público ou privado) via REST
+         handleJoinRoomResultREST(applyFuture, w, playerLogin, targetRoomID)
+     })
+
+    mux.HandleFunc("/request-play-note", func(w http.ResponseWriter, r *http.Request) {
+        if raftNode.State() != raft.Leader { http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable); return }
+        var reqBody map[string]interface{}
+        if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil { http.Error(w, "Corpo inválido", http.StatusBadRequest); return }
+        playerLogin, _ := reqBody["player_login"].(string)
+        note, _ := reqBody["note"].(string)
+        if playerLogin == "" || note == "" { http.Error(w, "Dados ausentes", http.StatusBadRequest); return }
+
+        logger.Printf(ColorCyan+"[API REST] Recebido pedido para jogar nota %s de %s"+ColorReset, note, playerLogin)
+
+        // Aplica no RAFT
+         cmdPayload, _ := json.Marshal(map[string]interface{}{
+             "player_login": playerLogin,
+             "note":         note,
+         })
+         cmd := []byte("PLAY_NOTE_RAFT:" + string(cmdPayload))
+         future := raftNode.Apply(cmd, 500*time.Millisecond)
+
+         if err := future.Error(); err != nil { http.Error(w, "Erro RAFT", 500); return }
+         fsmResp := future.Response().(fsmApplyResponse)
+          if fsmResp.err != nil { http.Error(w, fmt.Sprintf("Erro FSM: %v", fsmResp.err), 500); return }
+
+          // Processa o resultado da FSM
+          var responseToFollower interface{}
+
+          switch resultData := fsmResp.response.(type) {
+          case string: // Erro de negócio
+               responseToFollower = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: fmt.Sprintf("Não foi possível jogar: %s", resultData)}}
+          case map[string]interface{}: // Sucesso
+                p1Login := resultData["p1Login"].(string)
+                p2Login := resultData["p2Login"].(string)
+                salaID := ""
+                mu.Lock()
+                sala, ok := playersInRoom[playerLogin]
+                if ok && sala != nil { salaID = sala.ID }
+                currentP1Score, currentP2Score := 0, 0
+                if ok && sala != nil && sala.Game != nil {
+                    currentP1Score = sala.Game.Player1Score
+                    currentP2Score = sala.Game.Player2Score
+                }
+                mu.Unlock()
+
+                if salaID != "" {
+                     // Envia ROUND_RESULT MQTT
+                     if roundResultData, ok := resultData["roundResult"]; ok {
+                          var roundResult protocolo.RoundResultMessage
+                          mapToStruct(roundResultData, &roundResult)
+                          resultMsgP1 := roundResult; resultMsgP1.YourScore = currentP1Score; resultMsgP1.OpponentScore = currentP2Score
+                          publishToPlayer(salaID, p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
+                          resultMsgP2 := roundResult; resultMsgP2.YourScore = currentP2Score; resultMsgP2.OpponentScore = currentP1Score
+                          publishToPlayer(salaID, p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
+                     }
+                     // Verifica Game Over e envia MQTTs
+                     if gameEnded, _ := resultData["gameEnded"].(bool); gameEnded {
+                          winner := resultData["winner"].(string)
+                           mu.Lock()
+                           finalP1Score, finalP2Score := 0, 0
+                           sala, salaOk := salas[salaID]
+                           if salaOk && sala != nil && sala.Game != nil {
+                               finalP1Score = sala.Game.Player1Score
+                               finalP2Score = sala.Game.Player2Score
+                           }
+                           mu.Unlock()
+                           p1CoinsEarned := finalP1Score*5 + (func() int { if winner == p1Login { return 20 }; return 0 }())
+                           p2CoinsEarned := finalP2Score*5 + (func() int { if winner == p2Login { return 20 }; return 0 }())
+                           gameOverMsgP1 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p1CoinsEarned }
+                           publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+                           gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
+                           publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
+                           // Líder limpa estado da sala
+                           mu.Lock()
+                           delete(playersInRoom, p1Login)
+                           delete(playersInRoom, p2Login)
+                           delete(salas, salaID)
+                           mu.Unlock()
+                     } else {
+						// Envia TURN_UPDATE MQTT
+						nextTurnPlayerInt, ok := resultData["nextTurn"].(int)
+						if !ok {
+						// Se não for int, TENTA float64
+							if nextTurnPlayerFloat, okFloat := resultData["nextTurn"].(float64); okFloat {
+								nextTurnPlayerInt = int(nextTurnPlayerFloat)
+							} else {
+							// Não dá panic, só loga o erro. A resposta HTTP ainda precisa ser enviada.
+								logger.Printf(ColorRed+"[API REST] Erro CRÍTICO: 'nextTurn' não é nem int nem float64. Tipo: %T"+ColorReset, resultData["nextTurn"])
+							}
+						}
+						nextTurnPlayer := nextTurnPlayerInt // Usa o valor corrigido
+
+						publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
+						publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
+					}
+                }
+                responseToFollower = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: "Nota jogada."}} // Confirmação simples
+          default:
+              responseToFollower = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: "Erro inesperado ao processar nota."}}
+          }
+
+           w.Header().Set("Content-Type", "application/json")
+           json.NewEncoder(w).Encode(responseToFollower) // Envia a resposta HTTP de volta
+    })
+
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		logger.Fatalf(ColorRed+"Falha ao iniciar servidor HTTP da API: %v"+ColorReset, err)
@@ -1630,6 +2440,8 @@ func main() {
 	}
 	// --- FIM DO BLOCO DE LÓGICA DE CLUSTER CORRIGIDO ---
 
+	go setupServerMQTTClient("tcp://broker1:1883", *nodeID)
+
 	go startHttpApi(*nodeID, *httpAddr)
 
 	go func() {
@@ -1672,6 +2484,29 @@ func main() {
 		}
 		go handleConnection(conn)
 	}
+}
+
+// setupServerMQTTClient conecta o SERVIDOR ao broker MQTT
+func setupServerMQTTClient(brokerAddr string, nodeID string) {
+    opts := mqtt.NewClientOptions()
+    opts.AddBroker(brokerAddr)
+    // ID único para o cliente MQTT do *servidor*
+    opts.SetClientID(fmt.Sprintf("server-%s-%d", nodeID, time.Now().UnixNano()))
+    opts.SetAutoReconnect(true)
+    opts.SetConnectRetry(true)
+    opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+        logger.Printf(ColorRed+"[MQTT-Servidor] Conexão perdida com o broker: %v"+ColorReset, err)
+    })
+    opts.SetOnConnectHandler(func(client mqtt.Client) {
+        logger.Printf(ColorGreen+"[MQTT-Servidor] Conectado ao broker MQTT com sucesso!"+ColorReset)
+    })
+
+    mqttClient = mqtt.NewClient(opts)
+    if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+        logger.Fatalf(ColorRed+"Falha fatal ao conectar o servidor ao broker MQTT: %v"+ColorReset, token.Error())
+    } else if token.Error() != nil {
+        logger.Printf(ColorYellow+"[MQTT-Servidor] Aviso: %v"+ColorReset, token.Error())
+    }
 }
 
 // --- FUNÇÃO JOINCLUSTER ---
