@@ -491,6 +491,46 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		logger.Printf("[FSM] Nota %s jogada por %s na sala %s.", note, data.PlayerLogin, sala.ID)
 		return fsmApplyResponse{response: fsmResult}
 
+	case "SELECT_INSTRUMENT_RAFT":
+		var data struct {
+			PlayerLogin   string `json:"player_login"`
+			InstrumentoID string `json:"instrumento_id"` // <-- Mudei para ID (string)
+		}
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar select_instrument")}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+
+		player, ok := players[data.PlayerLogin]
+		if !ok {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s não encontrado para selecionar instrumento."+ColorReset, data.PlayerLogin)
+			return fsmApplyResponse{response: "PlayerNotFound"}
+		}
+
+		// Encontra o instrumento no inventário do jogador PELO ID
+		var foundInstrument *protocolo.Instrumento
+		for _, inst := range player.Inventario.Instrumentos {
+			if inst.ID == data.InstrumentoID {
+				// IMPORTANTE: Precisamos copiar o instrumento para
+				// player.SelectedInstrument para evitar problemas de ponteiro
+				// com o slice do inventário.
+				tempInst := inst 
+				foundInstrument = &tempInst
+				break
+			}
+		}
+
+		if foundInstrument == nil {
+			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s tentou selecionar instrumento (%s) que não possui."+ColorReset, data.PlayerLogin, data.InstrumentoID)
+			return fsmApplyResponse{response: "InstrumentNotFound"}
+		}
+
+		// Atualiza o estado REPLICADO
+		player.SelectedInstrument = foundInstrument
+
+		logger.Printf("[FSM] Jogador %s selecionou o instrumento %s.", data.PlayerLogin, foundInstrument.Name)
+		return fsmApplyResponse{response: "Selected:" + foundInstrument.Name}
 
 	default:
 		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
@@ -582,7 +622,6 @@ func loginUser(conn net.Conn, data protocolo.LoginRequest) {
 	}
 	sendJSON(conn, msg)
 }
-
 
 func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 
@@ -1853,12 +1892,57 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 	case "SELECT_INSTRUMENT":
 		var req protocolo.SelectInstrumentRequest
 		mapToStruct(msg.Data, &req)
-		if player != nil && req.InstrumentoID >= 0 && req.InstrumentoID < len(player.Inventario.Instrumentos) {
-			player.SelectedInstrument = &player.Inventario.Instrumentos[req.InstrumentoID]
-			sendScreenMsg(conn, fmt.Sprintf("Instrumento '%s' selecionado para a batalha!", player.SelectedInstrument.Name))
+
+		if player == nil {
+			sendScreenMsg(conn, "Erro: jogador não encontrado.")
+			return true
+		}
+		
+		// Pega o ID do instrumento selecionado (precisa ser por ID, não por índice)
+		var selectedInstrumentID string
+		if req.InstrumentoID >= 0 && req.InstrumentoID < len(player.Inventario.Instrumentos) {
+			selectedInstrumentID = player.Inventario.Instrumentos[req.InstrumentoID].ID
 		} else {
 			sendScreenMsg(conn, "Seleção de instrumento inválida.")
+			return true
 		}
+
+		// Prepara o payload para a FSM
+		payload := map[string]interface{}{
+			"player_login":   player.Login,
+			"instrumento_id": selectedInstrumentID,
+		}
+
+		// --- Lógica Líder/Seguidor ---
+		if raftNode.State() != raft.Leader {
+			// Seguidor: Encaminha para o líder
+			forwardRequestToLeader("/request-select-instrument", payload, conn)
+		} else {
+			// Líder: Aplica no RAFT
+			cmdPayload, _ := json.Marshal(payload)
+			cmd := []byte("SELECT_INSTRUMENT_RAFT:" + string(cmdPayload))
+
+			future := raftNode.Apply(cmd, 500*time.Millisecond)
+			if err := future.Error(); err != nil {
+				logger.Printf(ColorRed+"Erro RAFT ao selecionar instrumento por %s: %v"+ColorReset, player.Login, err)
+				sendScreenMsg(conn, "Erro interno ao selecionar (RAFT).")
+				return true
+			}
+			fsmResp := future.Response().(fsmApplyResponse)
+			if fsmResp.err != nil {
+				sendScreenMsg(conn, fmt.Sprintf("Erro FSM: %v", fsmResp.err))
+				return true
+			}
+			
+			// A FSM responde com "Selected:NomeDoInstrumento" ou um erro
+			if respStr, ok := fsmResp.response.(string); ok && strings.HasPrefix(respStr, "Selected:") {
+				instrumentName := strings.TrimPrefix(respStr, "Selected:")
+				sendScreenMsg(conn, fmt.Sprintf("Instrumento '%s' selecionado para a batalha!", instrumentName))
+			} else {
+				sendScreenMsg(conn, fmt.Sprintf("Não foi possível selecionar: %s", fsmResp.response))
+			}
+		}
+
 	case "PLAY_NOTE":
 		handlePlayNote(conn, msg.Data)
 
@@ -2338,6 +2422,43 @@ func startHttpApi(nodeID string, httpAddr string) {
            w.Header().Set("Content-Type", "application/json")
            json.NewEncoder(w).Encode(responseToFollower) // Envia a resposta HTTP de volta
     })
+
+	mux.HandleFunc("/request-select-instrument", func(w http.ResponseWriter, r *http.Request) {
+		if raftNode.State() != raft.Leader { http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable); return }
+		
+		var reqBody map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil { http.Error(w, "Corpo inválido", http.StatusBadRequest); return }
+		playerLogin, _ := reqBody["player_login"].(string)
+		
+		logger.Printf(ColorCyan+"[API REST] Recebido pedido para selecionar instrumento de %s"+ColorReset, playerLogin)
+
+		// Líder: Aplica no RAFT
+		cmdPayload, _ := json.Marshal(reqBody)
+		cmd := []byte("SELECT_INSTRUMENT_RAFT:" + string(cmdPayload))
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+
+		if err := future.Error(); err != nil {
+			http.Error(w, "Erro RAFT", 500)
+			return
+		}
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			http.Error(w, fmt.Sprintf("Erro FSM: %v", fsmResp.err), 500)
+			return
+		}
+
+		// Prepara a resposta de volta para o Seguidor
+		var respMsg protocolo.Message
+		if respStr, ok := fsmResp.response.(string); ok && strings.HasPrefix(respStr, "Selected:") {
+			instrumentName := strings.TrimPrefix(respStr, "Selected:")
+			respMsg = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: fmt.Sprintf("Instrumento '%s' selecionado para a batalha!", instrumentName)}}
+		} else {
+			respMsg = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: fmt.Sprintf("Não foi possível selecionar: %s", fsmResp.response)}}
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(respMsg)
+	})
 
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
