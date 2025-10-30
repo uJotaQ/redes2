@@ -117,6 +117,10 @@ var (
 	activeTrades map[string]*TradeOffer
 )
 
+// --- PERSISTÊNCIA DE DADOS ---
+const playerDataFile = "data/players.json" // SEM USO
+const instrumentDataFile = "data/instrumentos.json"
+
 // --- RAFT FSM (FINITE STATE MACHINE) ---
 type FSM struct{}
 
