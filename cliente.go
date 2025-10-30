@@ -603,7 +603,6 @@ ReconnectLoop:
 					case "7":
 						sendErr = sendJSON(writer, protocolo.Message{Type: "CHECK_BALANCE"})
 						currentState = StopState
-						// Continua no MenuState após pedir saldo
 					case "8":
 						if len(currentInventario.Instrumentos) == 0 {
 							fmt.Println("Você não tem instrumentos para trocar!")

@@ -22,7 +22,6 @@ import (
 
 	"pbl_redes/protocolo"
 
-	// mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
@@ -53,7 +52,7 @@ type fsmApplyResponse struct { // Resposta da FSM pra o servidor dela proprio (t
 type FsmTradeCompletionResult struct {
 	P1Login       string
     P2Login       string
-	ResponseForP1 *protocolo.TradeResponse // Resposta formatada para o Player 1 original
+	ResponseForP1 *protocolo.TradeResponse // Resposta o Player 1 que fez o pedido inicial
 	ResponseForP2 *protocolo.TradeResponse // Resposta formatada para o Player 2 que completou
 }
 
@@ -99,16 +98,16 @@ type TradeOffer struct {
 // --- VARIÁVEIS GLOBAIS ---
 
 var (
-	salas              map[string]*Sala
-	salasEmEspera      []*Sala
-	playersInRoom      map[string]*Sala
-	players            map[string]*User
-	instrumentDatabase []protocolo.Instrumento
-	packetStock        map[string]*protocolo.Packet
-	stockMu            sync.RWMutex
-	mu                 sync.Mutex
-	// mqttClient         mqtt.Client
-	raftNode           *raft.Raft
+	salas              map[string]*Sala // Todas
+	salasEmEspera      []*Sala			// Salas com 1 player so
+	playersInRoom      map[string]*Sala // Map dos players em uma sala pra chat (desuso)
+	players            map[string]*User // Map com todos os players cadastrados
+	instrumentDatabase []protocolo.Instrumento // Instrumentos do json
+	packetStock        map[string]*protocolo.Packet // estoque de cartas
+	stockMu            sync.RWMutex // mutex estoque
+	mu                 sync.Mutex   // mutex global
+
+	raftNode           *raft.Raft   // conexao do raft
 	fsmRand            *rand.Rand
 
 	tradeMu      sync.Mutex
@@ -358,7 +357,7 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		_, ok := players[data.Player2Login] // Renomeado para _
+		_, ok := players[data.Player2Login] 
 		if !ok {
 			logger.Printf(ColorYellow+"[FSM] Aviso: Jogador %s não encontrado para entrar na sala."+ColorReset, data.Player2Login)
 			return fsmApplyResponse{response: "PlayerNotFound"}
@@ -532,6 +531,50 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		logger.Printf("[FSM] Jogador %s selecionou o instrumento %s.", data.PlayerLogin, foundInstrument.Name)
 		return fsmApplyResponse{response: "Selected:" + foundInstrument.Name}
 
+	case "LOGIN_RAFT":
+		var data protocolo.LoginRequest
+		if err := json.Unmarshal([]byte(cmdPayload), &data); err != nil {
+			return fsmApplyResponse{err: fmt.Errorf("FSM: falha ao decodificar login")}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+
+		player, exists := players[data.Login]
+		if !exists {
+			// Retorna o status de erro que o cliente espera
+			return fsmApplyResponse{response: protocolo.LoginResponse{Status: "N_EXIST"}}
+		}
+		if player.Senha != data.Senha {
+			// (O cliente não diferencia, mas a FSM sim)
+			return fsmApplyResponse{response: protocolo.LoginResponse{Status: "WRONG_PASS"}} 
+		}
+		if player.Online {
+			// A checagem centralizada!
+			return fsmApplyResponse{response: protocolo.LoginResponse{Status: "ONLINE_JA"}}
+		}
+
+		// Tudo certo! Atualiza o estado replicado
+		player.Online = true
+		logger.Printf("[FSM] Jogador %s logado com sucesso.", data.Login)
+
+		// Retorna a resposta de sucesso completa para o servidor (que vai repassar ao cliente)
+		return fsmApplyResponse{response: protocolo.LoginResponse{
+			Status:     "LOGADO",
+			Inventario: player.Inventario,
+			Saldo:      player.Moedas,
+		}}
+
+	case "LOGOUT_RAFT":
+		playerLogin := cmdPayload
+		mu.Lock()
+		defer mu.Unlock()
+
+		if player, exists := players[playerLogin]; exists {
+			player.Online = false // Atualiza o estado replicado
+			logger.Printf("[FSM] Jogador %s deslogado.", playerLogin)
+		}
+		return fsmApplyResponse{response: "OK"}
+
 	default:
 		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
 		return fsmApplyResponse{err: fmt.Errorf("comando FSM desconhecido: %s", cmdType)}
@@ -546,81 +589,114 @@ type fsmSnapshot struct{}
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error { return sink.Close() }
 func (s *fsmSnapshot) Release()                             {}
 
-// --- LÓGICA DE PUBLICAÇÃO MQTT ---
-
-// func publishToPlayer(salaID, login string, message protocolo.Message) {
-// 	if mqttClient == nil || !mqttClient.IsConnected() {
-// 		logger.Println(ColorYellow + "AVISO: Cliente MQTT não está conectado, pulando publicação." + ColorReset)
-// 		return
-// 	}
-// 	topic := fmt.Sprintf("game/%s/%s", salaID, login)
-// 	payload, _ := json.Marshal(message)
-// 	token := mqttClient.Publish(topic, 0, false, payload)
-// 	go func() {
-// 		_ = token.Wait()
-// 		if token.Error() != nil {
-// 			logger.Printf(ColorRed+"Erro ao publicar no tópico %s: %v"+ColorReset, topic, token.Error())
-// 		}
-// 	}()
-// }
-
-// --- PERSISTÊNCIA DE DADOS ---
-const playerDataFile = "data/players.json"
-const instrumentDataFile = "data/instrumentos.json"
-
-// func loadPlayerData() {
-// 	mu.Lock()
-// 	defer mu.Unlock()
-// 	data, err := os.ReadFile(playerDataFile)
-// 	if err != nil {
-// 		if os.IsNotExist(err) {
-// 			logger.Printf("Arquivo de jogadores (%s) não encontrado. Um novo será criado.", playerDataFile)
-// 			players = make(map[string]*User)
-// 		}
-// 		return
-// 	}
-// 	json.Unmarshal(data, &players)
-// 	logger.Printf("%d jogadores carregados.", len(players))
-// }
-
-// func savePlayerData() {
-// 	logger.Println("\nSalvando dados dos jogadores...")
-// 	mu.Lock()
-// 	defer mu.Unlock()
-// 	for _, player := range players {
-// 		player.Online = false
-// 		player.Conn = nil
-// 	}
-// 	data, _ := json.MarshalIndent(players, "", "  ")
-// 	os.WriteFile(playerDataFile, data, 0644)
-// 	logger.Printf("Dados de %d jogadores salvos.", len(players))
-// }
 
 // --- LÓGICA DE LOGIN E CADASTRO ---
+// Esta função é chamada pela 'case "LOGIN"' e AGORA retorna a resposta
+func loginUser(conn net.Conn, data protocolo.LoginRequest) protocolo.LoginResponse {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		// Retorna o erro diretamente (SEM o campo Message)
+		return protocolo.LoginResponse{Status: "ERRO_INTERNO"} 
+	}
 
-func loginUser(conn net.Conn, data protocolo.LoginRequest) {
-	mu.Lock()
-	defer mu.Unlock()
-	player, exists := players[data.Login]
-	if !exists {
-		sendJSON(conn, protocolo.Message{Type: "LOGIN", Data: protocolo.LoginResponse{Status: "N_EXIST"}})
-		return
+	// --- Lógica Líder/Seguidor ---
+	if raftNode.State() != raft.Leader {
+		// Seguidor: Encaminha para o líder via REST
+		leaderRaftAddr := string(raftNode.Leader())
+		if leaderRaftAddr == "" {
+			return protocolo.LoginResponse{Status: "ERRO_INTERNO"}
+		}
+		leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+		reqURL := fmt.Sprintf("http://%s/request-login", leaderHttpAddr)
+
+		client := http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(payload))
+
+		if err != nil {
+			logger.Printf(ColorRed+"Erro ao encaminhar login para o líder: %v"+ColorReset, err)
+			return protocolo.LoginResponse{Status: "ERRO_INTERNO"}
+		}
+		defer resp.Body.Close()
+
+		var loginResp protocolo.LoginResponse
+		if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+			logger.Printf(ColorRed+"Erro ao decodificar resposta de login do líder: %v"+ColorReset, err)
+			return protocolo.LoginResponse{Status: "ERRO_INTERNO"}
+		}
+
+		if loginResp.Status == "LOGADO" {
+			mu.Lock()
+			if player, exists := players[data.Login]; exists {
+				player.Conn = conn
+			}
+			mu.Unlock()
+			logger.Printf(ColorGreen+"Login de %s (via seguidor) bem-sucedido."+ColorReset, data.Login)
+		}
+
+		return loginResp // Retorna a resposta do líder
+
+	} else {
+		// Líder: Aplica o comando no RAFT
+		logger.Printf(ColorGreen+"Sou o líder. Processando login de %s via RAFT."+ColorReset, data.Login)
+		cmd := []byte("LOGIN_RAFT:" + string(payload))
+
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			logger.Printf(ColorRed+"Erro ao aplicar comando RAFT (login): %v"+ColorReset, err)
+			return protocolo.LoginResponse{Status: "ERRO_INTERNO"}
+		}
+
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			logger.Printf(ColorRed+"Erro FSM (login): %v"+ColorReset, fsmResp.err)
+			// Retorna um status genérico de erro se a FSM falhou
+			return protocolo.LoginResponse{Status: "ERRO_FSM"}
+		}
+
+		loginResp, ok := fsmResp.response.(protocolo.LoginResponse)
+		if !ok {
+			logger.Printf(ColorRed+"Erro: FSM retornou tipo inesperado para login: %T"+ColorReset, fsmResp.response)
+			return protocolo.LoginResponse{Status: "ERRO_INTERNO"}
+		}
+
+		if loginResp.Status == "LOGADO" {
+			mu.Lock()
+			if player, exists := players[data.Login]; exists {
+				player.Conn = conn
+			}
+			mu.Unlock()
+		}
+
+		return loginResp // Retorna a resposta da FSM
 	}
-	if player.Online {
-		sendJSON(conn, protocolo.Message{Type: "LOGIN", Data: protocolo.LoginResponse{Status: "ONLINE_JA"}})
-		return
-	}
-	player.Conn = conn
-	player.Online = true
-	msg := protocolo.Message{
-		Type: "LOGIN",
-		Data: protocolo.LoginResponse{
-			Status:     "LOGADO",
-			Inventario: player.Inventario,
-			Saldo:      player.Moedas,
-		},
-	}
-	sendJSON(conn, msg)
+}
+
+func logoutUser(playerLogin string) {
+    if playerLogin == "" {
+        return
+    }
+
+    payload, _ := json.Marshal(map[string]string{"login": playerLogin})
+
+    if raftNode.State() != raft.Leader {
+        // Seguidor: Notifica o líder via REST (não precisa de resposta)
+        leaderRaftAddr := string(raftNode.Leader())
+        if leaderRaftAddr == "" { return } // Se não sabe o líder, não pode deslogar
+        leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+        reqURL := fmt.Sprintf("http://%s/request-logout", leaderHttpAddr)
+
+        // Dispara em goroutine "fire-and-forget"
+        go func() {
+            client := http.Client{Timeout: 2 * time.Second}
+            client.Post(reqURL, "application/json", bytes.NewBuffer(payload))
+        }()
+
+    } else {
+        // Líder: Aplica no RAFT (fire-and-forget)
+        cmd := []byte("LOGOUT_RAFT:" + playerLogin)
+        // Não esperamos pelo future, é só um logout
+        _ = raftNode.Apply(cmd, 500*time.Millisecond) 
+    }
 }
 
 func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
@@ -702,7 +778,6 @@ func findPlayerLoginBySala(sala *Sala, wantPlayer1 bool) string {
     }
     return sala.P2Login
 }
-
 
 // Versão FSM-safe de checkAttackCompletion. Retorna login do atacante.
 // PRECISA ser chamada com 'mu' bloqueado.
@@ -1224,44 +1299,6 @@ func createRoom(conn net.Conn) {
 	}
 }
 
-// func sendPairing(conn net.Conn) {
-// 	p := findPlayerByConn(conn)
-// 	sala := playersInRoom[conn.RemoteAddr().String()]
-// 	msg := protocolo.Message{Type: "PAREADO", Data: protocolo.PairingMessage{Status: "PAREADO", SalaID: sala.ID, PlayerLogin: p.Login}}
-// 	sendJSON(conn, msg)
-// }
-
-// --- LÓGICA DO JOGO MUSICAL ---
-
-// func startGame(sala *Sala) {
-// 	p1 := findPlayerByConn(sala.Jogador1)
-// 	p2 := findPlayerByConn(sala.Jogador2)
-// 	if p1 == nil || p2 == nil {
-// 		return
-// 	}
-
-// 	sala.Game = &GameState{
-// 		CurrentTurn: 1,
-// 	}
-
-// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2.Login}})
-// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1.Login}})
-
-// 	time.Sleep(1 * time.Second)
-// 	notifyTurn(sala)
-// }
-
-// func notifyTurn(sala *Sala) {
-// 	p1 := findPlayerByConn(sala.Jogador1)
-// 	p2 := findPlayerByConn(sala.Jogador2)
-// 	if p1 == nil || p2 == nil {
-// 		return
-// 	}
-
-// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 1}})
-// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: sala.Game.CurrentTurn == 2}})
-// }
-
 // Porteiro para PLAY_NOTE
 func handlePlayNote(conn net.Conn, data interface{}) {
     var req protocolo.PlayNoteRequest
@@ -1405,84 +1442,6 @@ func handlePlayNote(conn net.Conn, data interface{}) {
         }
     }
 }
-
-// func checkAttackCompletion(sala *Sala) (string, *User) {
-// 	p1 := findPlayerByConn(sala.Jogador1)
-// 	p2 := findPlayerByConn(sala.Jogador2)
-// 	sequence := strings.Join(sala.Game.PlayedNotes, "")
-
-// 	if p1.SelectedInstrument != nil {
-// 		for _, attack := range p1.SelectedInstrument.Attacks {
-// 			attackSeq := strings.Join(attack.Sequence, "")
-// 			if strings.HasSuffix(sequence, attackSeq) {
-// 				return attack.Name, p1
-// 			}
-// 		}
-// 	}
-// 	if p2.SelectedInstrument != nil {
-// 		for _, attack := range p2.SelectedInstrument.Attacks {
-// 			attackSeq := strings.Join(attack.Sequence, "")
-// 			if strings.HasSuffix(sequence, attackSeq) {
-// 				return attack.Name, p2
-// 			}
-// 		}
-// 	}
-// 	return "", nil
-// }
-
-// func endGame(sala *Sala) {
-// 	game := sala.Game
-// 	p1 := findPlayerByConn(sala.Jogador1)
-// 	p2 := findPlayerByConn(sala.Jogador2)
-
-// 	p1.Moedas += game.Player1Score * 5
-// 	p2.Moedas += game.Player2Score * 5
-
-// 	var winner string
-// 	if game.Player1Score > game.Player2Score {
-// 		winner = p1.Login
-// 		p1.Moedas += 20
-// 	} else if game.Player2Score > game.Player1Score {
-// 		winner = p2.Login
-// 		p2.Moedas += 20
-// 	} else {
-// 		winner = "EMPATE"
-// 	}
-
-// 	gameOverMsgP1 := protocolo.GameOverMessage{
-// 		Winner:       winner,
-// 		FinalScoreP1: game.Player1Score,
-// 		FinalScoreP2: game.Player2Score,
-// 		CoinsEarned: game.Player1Score*5 + (func() int {
-// 			if winner == p1.Login {
-// 				return 20
-// 			}
-// 			return 0
-// 		}()),
-// 	}
-// 	publishToPlayer(sala.ID, p1.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
-
-// 	gameOverMsgP2 := protocolo.GameOverMessage{
-// 		Winner:       winner,
-// 		FinalScoreP1: game.Player1Score,
-// 		FinalScoreP2: game.Player2Score,
-// 		CoinsEarned: game.Player2Score*5 + (func() int {
-// 			if winner == p2.Login {
-// 				return 20
-// 			}
-// 			return 0
-// 		}()),
-// 	}
-// 	publishToPlayer(sala.ID, p2.Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
-
-// 	mu.Lock()
-// 	delete(playersInRoom, sala.Jogador1.RemoteAddr().String())
-// 	if sala.Jogador2 != nil {
-// 		delete(playersInRoom, sala.Jogador2.RemoteAddr().String())
-// 	}
-// 	delete(salas, sala.ID)
-// 	mu.Unlock()
-// }
 
 // --- LÓGICA DE PACOTES E INSTRUMENTOS ---
 
@@ -1853,94 +1812,145 @@ func notifyPlayer(targetLogin string, messageToSend protocolo.Message) {
 // --- INTERPRETADOR E CONEXÃO ---
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
+    var playerLogin string // Variável local para o defer
+    defer func() {
+        // Esta função roda QUANDO o loop quebra (desconexão ou erro)
+        conn.Close()
+        if playerLogin != "" {
+            // Limpa o estado volátil LOCAL (este nó pode ser líder ou seguidor)
+            mu.Lock()
+            if p, ok := players[playerLogin]; ok {
+                p.Conn = nil // Limpa a conexão volátil
+            }
+            mu.Unlock()
 
-	for {
-		message, err := reader.ReadString('\n')
-		if err != nil {
-			mu.Lock()
-			player := findPlayerByConn(conn)
-			if player != nil {
-				player.Online = false
-				player.Conn = nil
-				logger.Printf(ColorYellow+"Usuário %s desconectou."+ColorReset, player.Login)
-			}
-			mu.Unlock()
-			return
-		}
-		if !interpreter(conn, message) {
-			break
-		}
-	}
+            // Dispara o comando de logout replicado para a FSM
+            // (Você precisa ter a func logoutUser que te mandei antes)
+            logoutUser(playerLogin) 
+        }
+    }() // Fim do defer
+
+    reader := bufio.NewReader(conn) // <-- Linha 2017. AGORA VAI SER USADA.
+
+    // ESTE É O LOOP QUE ESTAVA FALTANDO:
+    for {
+        message, err := reader.ReadString('\n')
+        if err != nil {
+            // Cliente desconectou (EOF ou erro)
+            logger.Printf("Cliente desconectado (erro: %v), acionando defer...", err)
+            return // Sai da função, aciona o defer
+        }
+        
+        // Modifica a chamada da 'interpreter'
+        // (Ainda vai dar erro aqui, vamos corrigir a interpreter no Passo 2)
+        keepGoing, newLogin := interpreter(conn, message)
+        
+        if newLogin != "" { // A interpreter nos retornou um login!
+            playerLogin = newLogin // Armazena o login para o defer
+        }
+        
+        if !keepGoing { // 'QUIT' foi chamado
+            return // Sai da função, aciona o defer
+        }
+    }
 }
 
-func interpreter(conn net.Conn, fullMessage string) bool {
+func interpreter(conn net.Conn, fullMessage string) (bool, string) {
 	var msg protocolo.Message
 	if err := json.Unmarshal([]byte(fullMessage), &msg); err != nil {
 		sendScreenMsg(conn, "Mensagem inválida.")
-		return true
+		return true, "" // Corrigido
 	}
 
-	player := findPlayerByConn(conn)
+	player := findPlayerByConn(conn) // Pode ser nil se ainda não logou
 
 	switch msg.Type {
 	case "CADASTRO":
 		var data protocolo.SignInRequest
 		mapToStruct(msg.Data, &data)
 		cadastrarUser(conn, data)
+		return true, "" // Corrigido
+
 	case "LOGIN":
 		var data protocolo.LoginRequest
 		mapToStruct(msg.Data, &data)
-		loginUser(conn, data)
+		
+		// Chama o wrapper que faz a lógica Raft/HTTP
+		loginResponse := loginUser(conn, data) 
+		
+		// Envia a resposta (seja sucesso ou erro) para o cliente
+		sendJSON(conn, protocolo.Message{Type: "LOGIN", Data: loginResponse})
+
+		// Se o login foi OK ("LOGADO"), RETORNA o login para a handleConnection
+		if loginResponse.Status == "LOGADO" {
+			return true, data.Login // Retorna o login para handleConnection
+		}
+		// Se falhou (N_EXIST, ONLINE_JA, etc), continua mas não retorna login
+		return true, "" // Corrigido
+
 	case "CREATE_ROOM":
 		createRoom(conn)
+		return true, "" // Corrigido
+
 	case "FIND_ROOM":
 		var data protocolo.RoomRequest
 		mapToStruct(msg.Data, &data)
 		findRoom(conn, data.Mode, "")
+		return true, "" // Corrigido
+
 	case "PRIV_ROOM":
 		var data protocolo.RoomRequest
 		mapToStruct(msg.Data, &data)
 		findRoom(conn, "", data.RoomCode)
+		return true, "" // Corrigido
+
 	case "COMPRA":
 		if player != nil {
 			openPacket(player)
-		}
+		} else {
+            // Se player for nil (não logado), informa erro
+            sendScreenMsg(conn, "Erro: Você precisa estar logado para comprar.")
+        }
+		return true, "" // Corrigido (continua mesmo se player for nil)
+
 	case "CHECK_BALANCE":
 		if player != nil {
 			sendJSON(conn, protocolo.Message{Type: "BALANCE_RESPONSE", Data: protocolo.BalanceResponse{Saldo: player.Moedas}})
-		}
+		} else {
+            sendScreenMsg(conn, "Erro: Você precisa estar logado para ver o saldo.")
+        }
+		return true, "" // Corrigido
+
 	case "SELECT_INSTRUMENT":
 		var req protocolo.SelectInstrumentRequest
 		mapToStruct(msg.Data, &req)
 
 		if player == nil {
 			sendScreenMsg(conn, "Erro: jogador não encontrado.")
-			return true
+			return true, "" // Corrigido
 		}
 		
-		// Pega o ID do instrumento selecionado (precisa ser por ID, não por índice)
 		var selectedInstrumentID string
+		// Acessa inventário localmente só para pegar o ID
+		mu.Lock() // Protege acesso ao inventário local
 		if req.InstrumentoID >= 0 && req.InstrumentoID < len(player.Inventario.Instrumentos) {
 			selectedInstrumentID = player.Inventario.Instrumentos[req.InstrumentoID].ID
-		} else {
+		}
+		mu.Unlock() // Libera o lock
+
+		if selectedInstrumentID == "" {
 			sendScreenMsg(conn, "Seleção de instrumento inválida.")
-			return true
+			return true, "" // Corrigido
 		}
 
-		// Prepara o payload para a FSM
 		payload := map[string]interface{}{
 			"player_login":   player.Login,
 			"instrumento_id": selectedInstrumentID,
 		}
 
-		// --- Lógica Líder/Seguidor ---
 		if raftNode.State() != raft.Leader {
-			// Seguidor: Encaminha para o líder
 			forwardRequestToLeader("/request-select-instrument", payload, conn)
 		} else {
-			// Líder: Aplica no RAFT
 			cmdPayload, _ := json.Marshal(payload)
 			cmd := []byte("SELECT_INSTRUMENT_RAFT:" + string(cmdPayload))
 
@@ -1948,15 +1958,14 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 			if err := future.Error(); err != nil {
 				logger.Printf(ColorRed+"Erro RAFT ao selecionar instrumento por %s: %v"+ColorReset, player.Login, err)
 				sendScreenMsg(conn, "Erro interno ao selecionar (RAFT).")
-				return true
+				return true, "" // Corrigido
 			}
 			fsmResp := future.Response().(fsmApplyResponse)
 			if fsmResp.err != nil {
 				sendScreenMsg(conn, fmt.Sprintf("Erro FSM: %v", fsmResp.err))
-				return true
+				return true, "" // Corrigido
 			}
 			
-			// A FSM responde com "Selected:NomeDoInstrumento" ou um erro
 			if respStr, ok := fsmResp.response.(string); ok && strings.HasPrefix(respStr, "Selected:") {
 				instrumentName := strings.TrimPrefix(respStr, "Selected:")
 				sendScreenMsg(conn, fmt.Sprintf("Instrumento '%s' selecionado para a batalha!", instrumentName))
@@ -1964,43 +1973,46 @@ func interpreter(conn net.Conn, fullMessage string) bool {
 				sendScreenMsg(conn, fmt.Sprintf("Não foi possível selecionar: %s", fsmResp.response))
 			}
 		}
+		return true, "" // Corrigido
 
 	case "PLAY_NOTE":
 		handlePlayNote(conn, msg.Data)
+		return true, "" // Corrigido
 
 	case "GET_INVENTORY":
-        if player != nil {
-            // Acessa o inventário (protegido pelo mutex global 'mu')
-            // Usamos Lock/Unlock para leitura, permitindo leituras concorrentes
-            mu.Lock() // Usar Lock normal por enquanto para segurança, já que outros lugares usam Lock
-            currentInv := player.Inventario
-            mu.Unlock()
-
-            // Envia o inventário atual para o cliente
-            sendJSON(conn, protocolo.Message{
-                Type: "INVENTORY_RESPONSE",
-                Data: protocolo.InventoryResponse{Inventario: currentInv},
-            })
+		if player != nil {
+			mu.Lock() 
+			currentInv := player.Inventario
+			mu.Unlock()
+			sendJSON(conn, protocolo.Message{
+				Type: "INVENTORY_RESPONSE",
+				Data: protocolo.InventoryResponse{Inventario: currentInv},
+			})
+		} else {
+            sendScreenMsg(conn, "Erro: Você precisa estar logado para ver o inventário.")
         }
+		return true, "" // Corrigido
 
 	case "PROPOSE_TRADE":
 		if player != nil {
 			proposeTrade(player, msg.Data)
-		}
+		} else {
+            sendScreenMsg(conn, "Erro: Você precisa estar logado para propor trocas.")
+        }
+		return true, "" // Corrigido
 
 	case "QUIT":
-		if player != nil {
-			mu.Lock()
-			player.Online = false
-			player.Conn = nil // Limpa a referência da conexão
-			logger.Printf(ColorYellow+"Usuário %s desconectou (QUIT)."+ColorReset, player.Login)
-			mu.Unlock()
-		}
-		return false
+		// Não chama logoutUser daqui. O defer vai pegar.
+		// Apenas retorna 'false' para quebrar o loop na handleConnection.
+		return false, "" // Corrigido
+
 	default:
 		sendScreenMsg(conn, "Comando inválido.")
+		return true, "" // Corrigido
 	}
-	return true
+	// Esta linha tecnicamente não é mais alcançada por causa dos returns nos cases,
+	// mas mantemos por segurança.
+	return true, "" // Corrigido
 }
 
 // --- Servidor HTTP para a API REST ---
@@ -2481,6 +2493,55 @@ func startHttpApi(nodeID string, httpAddr string) {
 		json.NewEncoder(w).Encode(respMsg)
 	})
 
+	mux.HandleFunc("/request-login", func(w http.ResponseWriter, r *http.Request) {
+		if raftNode.State() != raft.Leader {
+			http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable)
+			return
+		}
+
+		bodyBytes, _ := io.ReadAll(r.Body) // Lê o payload (LoginRequest)
+
+		logger.Printf(ColorCyan + "[API REST] Recebido pedido de login (encaminhado)" + ColorReset)
+		cmd := []byte("LOGIN_RAFT:" + string(bodyBytes))
+		future := raftNode.Apply(cmd, 500*time.Millisecond)
+		if err := future.Error(); err != nil {
+			http.Error(w, "Erro no RAFT", http.StatusInternalServerError)
+			return
+		}
+
+		fsmResp := future.Response().(fsmApplyResponse)
+		if fsmResp.err != nil {
+			http.Error(w, "Erro na FSM", http.StatusInternalServerError)
+			return
+		}
+
+		// Retorna a LoginResponse (ou erro) para o Seguidor
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(fsmResp.response)
+	})
+
+	mux.HandleFunc("/request-logout", func(w http.ResponseWriter, r *http.Request) {
+		if raftNode.State() != raft.Leader {
+			http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable)
+			return
+		}
+
+		var data map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			http.Error(w, "Corpo inválido", http.StatusBadRequest)
+			return
+		}
+		playerLogin := data["login"]
+
+		logger.Printf(ColorCyan+"[API REST] Recebido pedido de logout para %s"+ColorReset, playerLogin)
+
+		// Aplica no RAFT (fire-and-forget)
+		cmd := []byte("LOGOUT_RAFT:" + playerLogin)
+		_ = raftNode.Apply(cmd, 500*time.Millisecond)
+
+		w.WriteHeader(http.StatusOK) // Só confirma que recebeu
+	})
+
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		logger.Fatalf(ColorRed+"Falha ao iniciar servidor HTTP da API: %v"+ColorReset, err)
@@ -2627,29 +2688,6 @@ func main() {
 		go handleConnection(conn)
 	}
 }
-
-// setupServerMQTTClient conecta o SERVIDOR ao broker MQTT
-// func setupServerMQTTClient(brokerAddr string, nodeID string) {
-//     opts := mqtt.NewClientOptions()
-//     opts.AddBroker(brokerAddr)
-//     // ID único para o cliente MQTT do *servidor*
-//     opts.SetClientID(fmt.Sprintf("server-%s-%d", nodeID, time.Now().UnixNano()))
-//     opts.SetAutoReconnect(true)
-//     opts.SetConnectRetry(true)
-//     opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-//         logger.Printf(ColorRed+"[MQTT-Servidor] Conexão perdida com o broker: %v"+ColorReset, err)
-//     })
-//     opts.SetOnConnectHandler(func(client mqtt.Client) {
-//         logger.Printf(ColorGreen+"[MQTT-Servidor] Conectado ao broker MQTT com sucesso!"+ColorReset)
-//     })
-
-//     mqttClient = mqtt.NewClient(opts)
-//     if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-//         logger.Fatalf(ColorRed+"Falha fatal ao conectar o servidor ao broker MQTT: %v"+ColorReset, token.Error())
-//     } else if token.Error() != nil {
-//         logger.Printf(ColorYellow+"[MQTT-Servidor] Aviso: %v"+ColorReset, token.Error())
-//     }
-// }
 
 // --- FUNÇÃO JOINCLUSTER ---
 func joinCluster(joinAddrs, nodeID, raftAddr string) error {
