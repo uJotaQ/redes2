@@ -14,7 +14,7 @@ import (
 
 	"pbl_redes/protocolo"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	// mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // Estados do cliente
@@ -35,144 +35,144 @@ var (
 	currentBalance    int
 	currentState      GameState
 	isMyTurn          bool
-	mqttClient        mqtt.Client
+	// mqttClient        mqtt.Client
 	
 )
 
 // --- LÓGICA DE CONEXÃO E MQTT ---
 
-func messageHandler(client mqtt.Client, msg mqtt.Message) {
-	var genericMsg protocolo.Message
-	if err := json.Unmarshal(msg.Payload(), &genericMsg); err != nil {
-		fmt.Printf("Erro ao decodificar mensagem MQTT: %v\n", err)
-		return
-	}
+// func messageHandler(client mqtt.Client, msg mqtt.Message) {
+// 	var genericMsg protocolo.Message
+// 	if err := json.Unmarshal(msg.Payload(), &genericMsg); err != nil {
+// 		fmt.Printf("Erro ao decodificar mensagem MQTT: %v\n", err)
+// 		return
+// 	}
 
-	switch genericMsg.Type {
-	case "GAME_START":
-		var data protocolo.GameStartMessage
-		mapToStruct(genericMsg.Data, &data)
-		fmt.Printf("\n--- ⚔️ BATALHA INICIADA vs %s ⚔️ ---\n", data.Opponent)
-		currentState = InGameState
-	case "TURN_UPDATE":
-		var data protocolo.TurnMessage
-		mapToStruct(genericMsg.Data, &data)
-		isMyTurn = data.IsYourTurn
-		if isMyTurn {
-			currentState = TurnState
-		} else {
-			fmt.Println("Aguardando oponente...")
-		}
-	case "ROUND_RESULT":
-		var data protocolo.RoundResultMessage
-		mapToStruct(genericMsg.Data, &data)
-		fmt.Printf("\n> %s jogou a nota: %s\n", data.PlayerName, data.PlayedNote)
-		fmt.Printf("  Sequência atual: %s\n", data.CurrentSequence)
-		if data.AttackTriggered {
-			fmt.Printf("  💥 ATAQUE '%s' por %s!\n", data.AttackName, data.AttackerName)
-		}
-		fmt.Printf("  Placar: Você %d x %d Oponente\n", data.YourScore, data.OpponentScore)
-	case "GAME_OVER":
-		var data protocolo.GameOverMessage
-		mapToStruct(genericMsg.Data, &data)
-		fmt.Println("\n\n--- FIM DE JOGO ---")
-		if data.Winner == currentUser {
-			fmt.Println("🏆 VOCÊ VENCEU! 🏆")
-		} else if data.Winner == "EMPATE" {
-			fmt.Println("A partida terminou em EMPATE!")
-		} else {
-			fmt.Printf("💀 Você perdeu. O vencedor é: %s\n", data.Winner)
-		}
-		fmt.Printf("Você ganhou %d moedas!\n", data.CoinsEarned)
-		currentBalance += data.CoinsEarned // Atualiza saldo local
-		fmt.Println("Voltando para o menu principal em 5 segundos...")
-		time.Sleep(5 * time.Second)
-		currentState = MenuState
-	}
-}
+// 	switch genericMsg.Type {
+// 	case "GAME_START":
+// 		var data protocolo.GameStartMessage
+// 		mapToStruct(genericMsg.Data, &data)
+// 		fmt.Printf("\n--- ⚔️ BATALHA INICIADA vs %s ⚔️ ---\n", data.Opponent)
+// 		currentState = InGameState
+// 	case "TURN_UPDATE":
+// 		var data protocolo.TurnMessage
+// 		mapToStruct(genericMsg.Data, &data)
+// 		isMyTurn = data.IsYourTurn
+// 		if isMyTurn {
+// 			currentState = TurnState
+// 		} else {
+// 			fmt.Println("Aguardando oponente...")
+// 		}
+// 	case "ROUND_RESULT":
+// 		var data protocolo.RoundResultMessage
+// 		mapToStruct(genericMsg.Data, &data)
+// 		fmt.Printf("\n> %s jogou a nota: %s\n", data.PlayerName, data.PlayedNote)
+// 		fmt.Printf("  Sequência atual: %s\n", data.CurrentSequence)
+// 		if data.AttackTriggered {
+// 			fmt.Printf("  💥 ATAQUE '%s' por %s!\n", data.AttackName, data.AttackerName)
+// 		}
+// 		fmt.Printf("  Placar: Você %d x %d Oponente\n", data.YourScore, data.OpponentScore)
+// 	case "GAME_OVER":
+// 		var data protocolo.GameOverMessage
+// 		mapToStruct(genericMsg.Data, &data)
+// 		fmt.Println("\n\n--- FIM DE JOGO ---")
+// 		if data.Winner == currentUser {
+// 			fmt.Println("🏆 VOCÊ VENCEU! 🏆")
+// 		} else if data.Winner == "EMPATE" {
+// 			fmt.Println("A partida terminou em EMPATE!")
+// 		} else {
+// 			fmt.Printf("💀 Você perdeu. O vencedor é: %s\n", data.Winner)
+// 		}
+// 		fmt.Printf("Você ganhou %d moedas!\n", data.CoinsEarned)
+// 		currentBalance += data.CoinsEarned // Atualiza saldo local
+// 		fmt.Println("Voltando para o menu principal em 5 segundos...")
+// 		time.Sleep(5 * time.Second)
+// 		currentState = MenuState
+// 	}
+// }
 
-func setupMQTTClient() {
-    // Se o cliente já foi configurado, não faz nada
-    if mqttClient != nil {
-        // Se por acaso estava conectado, desconecta para garantir um estado limpo
-        if mqttClient.IsConnected() {
-            mqttClient.Disconnect(100)
-        }
-    }
+// func setupMQTTClient() {
+//     // Se o cliente já foi configurado, não faz nada
+//     if mqttClient != nil {
+//         // Se por acaso estava conectado, desconecta para garantir um estado limpo
+//         if mqttClient.IsConnected() {
+//             mqttClient.Disconnect(100)
+//         }
+//     }
 
-    opts := mqtt.NewClientOptions()
-    opts.AddBroker("tcp://127.0.0.1:1883")
-    opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().UnixNano()))
-    opts.SetDefaultPublishHandler(messageHandler)
+//     opts := mqtt.NewClientOptions()
+//     opts.AddBroker("tcp://127.0.0.1:1883")
+//     opts.SetClientID(fmt.Sprintf("client-%s-%d", currentUser, time.Now().UnixNano()))
+//     opts.SetDefaultPublishHandler(messageHandler)
 
-    // *** REMOVEMOS A RECONEXÃO AUTOMÁTICA ***
-    // opts.SetAutoReconnect(true) 
-    // opts.SetConnectRetry(true)
+//     // *** REMOVEMOS A RECONEXÃO AUTOMÁTICA ***
+//     // opts.SetAutoReconnect(true) 
+//     // opts.SetConnectRetry(true)
     
-    // Mantém os handlers apenas para debug, se quiser
-    opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-        fmt.Printf("\n[MQTT DEBUG] Conexão perdida: %v.\n", err)
-    })
-    opts.SetOnConnectHandler(func(client mqtt.Client) {
-        fmt.Println("\n[MQTT DEBUG] Conexão estabelecida.")
-    })
+//     // Mantém os handlers apenas para debug, se quiser
+//     opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+//         fmt.Printf("\n[MQTT DEBUG] Conexão perdida: %v.\n", err)
+//     })
+//     opts.SetOnConnectHandler(func(client mqtt.Client) {
+//         fmt.Println("\n[MQTT DEBUG] Conexão estabelecida.")
+//     })
 
-    mqttClient = mqtt.NewClient(opts)
+//     mqttClient = mqtt.NewClient(opts)
     
-    // *** NÃO CONECTA AQUI ***
-    // A conexão será feita "sob demanda" pela função subscribe.
-    fmt.Println("\n[INFO] Cliente MQTT configurado (mas não conectado).")
-}
+//     // *** NÃO CONECTA AQUI ***
+//     // A conexão será feita "sob demanda" pela função subscribe.
+//     fmt.Println("\n[INFO] Cliente MQTT configurado (mas não conectado).")
+// }
 
-func subscribeToGameTopic(salaID, playerLogin string) {
-    if mqttClient == nil {
-        fmt.Println("[ERRO] Cliente MQTT não foi configurado (setupMQTTClient nunca foi chamado).")
-        return
-    }
+// func subscribeToGameTopic(salaID, playerLogin string) {
+//     if mqttClient == nil {
+//         fmt.Println("[ERRO] Cliente MQTT não foi configurado (setupMQTTClient nunca foi chamado).")
+//         return
+//     }
 
-    // Se por acaso já estava conectado (de um jogo anterior), desconecta primeiro
-    // para garantir uma conexão "limpa".
-    if mqttClient.IsConnected() {
-        fmt.Println("[INFO] Desconectando de sessão MQTT antiga...")
-        mqttClient.Disconnect(250) // Espera 250ms
-    }
+//     // Se por acaso já estava conectado (de um jogo anterior), desconecta primeiro
+//     // para garantir uma conexão "limpa".
+//     if mqttClient.IsConnected() {
+//         fmt.Println("[INFO] Desconectando de sessão MQTT antiga...")
+//         mqttClient.Disconnect(250) // Espera 250ms
+//     }
 
-    // --- CONEXÃO ATIVA ---
-    // Tenta conectar AGORA.
-    fmt.Println("[INFO] Conectando ao broker MQTT para a partida...")
-    if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-        // Se a conexão falhar AGORA, reporta o erro e desiste.
-        fmt.Printf("[ERRO] Falha fatal ao conectar no MQTT: %v\n", token.Error())
-        fmt.Println("Não será possível receber atualizações do jogo.")
-        return
-    }
+//     // --- CONEXÃO ATIVA ---
+//     // Tenta conectar AGORA.
+//     fmt.Println("[INFO] Conectando ao broker MQTT para a partida...")
+//     if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+//         // Se a conexão falhar AGORA, reporta o erro e desiste.
+//         fmt.Printf("[ERRO] Falha fatal ao conectar no MQTT: %v\n", token.Error())
+//         fmt.Println("Não será possível receber atualizações do jogo.")
+//         return
+//     }
     
-    // Se chegou aqui, a conexão foi feita com sucesso.
-    fmt.Println("[INFO] Conexão MQTT estabelecida com sucesso.")
+//     // Se chegou aqui, a conexão foi feita com sucesso.
+//     fmt.Println("[INFO] Conexão MQTT estabelecida com sucesso.")
 
-    // --- INSCRIÇÃO ---
-    // Agora que temos 100% de certeza que a conexão está ativa,
-    // podemos nos inscrever com segurança.
-    topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
-    if token := mqttClient.Subscribe(topic, 1, nil); token.WaitTimeout(3*time.Second) && token.Error() != nil {
-        // Se falhar aqui, é o erro que você viu.
-        fmt.Printf("[ERRO] Falha ao se inscrever no tópico do jogo %s: %v\n", topic, token.Error())
-    } else if token.Error() == nil {
-        fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
-    }
-}
+//     // --- INSCRIÇÃO ---
+//     // Agora que temos 100% de certeza que a conexão está ativa,
+//     // podemos nos inscrever com segurança.
+//     topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
+//     if token := mqttClient.Subscribe(topic, 1, nil); token.WaitTimeout(3*time.Second) && token.Error() != nil {
+//         // Se falhar aqui, é o erro que você viu.
+//         fmt.Printf("[ERRO] Falha ao se inscrever no tópico do jogo %s: %v\n", topic, token.Error())
+//     } else if token.Error() == nil {
+//         fmt.Printf("[INFO] Inscrito no tópico da partida: %s\n", topic)
+//     }
+// }
 
-// Desinscreve do tópico no final do jogo ou desconexão
-func unsubscribeFromGameTopic(salaID, playerLogin string) {
-	if mqttClient != nil && mqttClient.IsConnected() {
-		topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
-		if token := mqttClient.Unsubscribe(topic); token.WaitTimeout(3*time.Second) && token.Error() != nil {
-			fmt.Printf("[ERRO] Falha ao desinscrever do tópico %s: %v\n", topic, token.Error())
-		} else if token.Error() == nil {
-			fmt.Printf("[INFO] Desinscrito do tópico da partida: %s\n", topic)
-		}
-	}
-}
+// // Desinscreve do tópico no final do jogo ou desconexão
+// func unsubscribeFromGameTopic(salaID, playerLogin string) {
+// 	if mqttClient != nil && mqttClient.IsConnected() {
+// 		topic := fmt.Sprintf("game/%s/%s", salaID, playerLogin)
+// 		if token := mqttClient.Unsubscribe(topic); token.WaitTimeout(3*time.Second) && token.Error() != nil {
+// 			fmt.Printf("[ERRO] Falha ao desinscrever do tópico %s: %v\n", topic, token.Error())
+// 		} else if token.Error() == nil {
+// 			fmt.Printf("[INFO] Desinscrito do tópico da partida: %s\n", topic)
+// 		}
+// 	}
+// }
 
 // --- FUNÇÕES AUXILIARES ---
 
@@ -393,7 +393,7 @@ ReconnectLoop:
 						currentInventario = data.Inventario
 						currentState = MenuState
 						// Inicia a conexão MQTT APÓS o login TCP bem-sucedido
-						go setupMQTTClient()
+						// go setupMQTTClient()
 					} else if data.Status == "ONLINE_JA" {
 						fmt.Println("Login falhou: Usuário já está online em outra sessão.")
 						currentState = LoginState
@@ -419,7 +419,7 @@ ReconnectLoop:
 						currentState = InGameState // Muda para InGameState ao ser pareado
 						fmt.Println("\nPartida encontrada! Aguarde o início via MQTT...")
 						// Se inscreve no tópico MQTT após confirmação de pareamento
-						subscribeToGameTopic(data.SalaID, data.PlayerLogin)
+						// subscribeToGameTopic(data.SalaID, data.PlayerLogin)
 					} else {
 						// Pode haver outros status de pareamento? (ex: FALHOU)
 						fmt.Println("\n[AVISO] Falha no pareamento ou status desconhecido:", data.Status)
@@ -454,6 +454,7 @@ ReconnectLoop:
 					mapToStruct(msg.Data, &data)
 					fmt.Printf("\nSeu saldo atual: %d moedas.\n", data.Saldo)
 					currentBalance = data.Saldo // Atualiza saldo local
+					currentState = MenuState
 
 				case "TRADE_RESPONSE":
                     var data protocolo.TradeResponse
@@ -475,6 +476,46 @@ ReconnectLoop:
 					mapToStruct(msg.Data, &data)
 					currentInventario = data.Inventario
 					showInventory()
+					currentState = MenuState
+					
+				case "GAME_START":
+					var data protocolo.GameStartMessage
+					mapToStruct(msg.Data, &data)
+					fmt.Printf("\n--- ⚔️ BATALHA INICIADA vs %s ⚔️ ---\n", data.Opponent)
+					currentState = InGameState
+				case "TURN_UPDATE":
+					var data protocolo.TurnMessage
+					mapToStruct(msg.Data, &data)
+					isMyTurn = data.IsYourTurn
+					if isMyTurn {
+						currentState = TurnState
+					} else {
+						fmt.Println("Aguardando oponente...")
+					}
+				case "ROUND_RESULT":
+					var data protocolo.RoundResultMessage
+					mapToStruct(msg.Data, &data)
+					fmt.Printf("\n> %s jogou a nota: %s\n", data.PlayerName, data.PlayedNote)
+					fmt.Printf("  Sequência atual: %s\n", data.CurrentSequence)
+					if data.AttackTriggered {
+						fmt.Printf("  💥 ATAQUE '%s' por %s!\n", data.AttackName, data.AttackerName)
+					}
+					fmt.Printf("  Placar: Você %d x %d Oponente\n", data.YourScore, data.OpponentScore)
+				case "GAME_OVER":
+					var data protocolo.GameOverMessage
+					mapToStruct(msg.Data, &data)
+					fmt.Println("\n\n--- FIM DE JOGO ---")
+					if data.Winner == currentUser {
+						fmt.Println("🏆 VOCÊ VENCEU! 🏆")
+					} else if data.Winner == "EMPATE" {
+						fmt.Println("A partida terminou em EMPATE!")
+					} else {
+						fmt.Printf("💀 Você perdeu. O vencedor é: %s\n", data.Winner)
+					}
+					fmt.Printf("Você ganhou %d moedas!\n", data.CoinsEarned)
+					currentBalance += data.CoinsEarned 
+					fmt.Println("Voltando para o menu principal em 5 segundos...")
+					time.Sleep(5 * time.Second)
 					currentState = MenuState
 
 				default:
@@ -561,6 +602,7 @@ ReconnectLoop:
 						selectInstrument(writer, userInputReader) // Envio é feito dentro da função
 					case "7":
 						sendErr = sendJSON(writer, protocolo.Message{Type: "CHECK_BALANCE"})
+						currentState = StopState
 						// Continua no MenuState após pedir saldo
 					case "8":
 						if len(currentInventario.Instrumentos) == 0 {

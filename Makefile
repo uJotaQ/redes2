@@ -9,7 +9,7 @@
 # Sobe todo o ambiente (3 servidores + 1 broker)
 up:
 	@echo "Subindo broker e servidor1..."
-	docker compose up --build -d broker1 servidor1
+	docker compose up --build -d servidor1
 	@echo "Aguardando 0.5 segundos para o servidor1 se estabilizar..."
 	@sleep 0.1
 	@echo "Subindo servidor2 ..."
@@ -44,7 +44,7 @@ build:
 
 # Inicia o servidor 1 (e o broker, caso não esteja rodando)
 servidor1:
-	docker compose up --build -d broker1 servidor1
+	docker compose up --build -d servidor1
 
 # Inicia o servidor 2
 servidor2:

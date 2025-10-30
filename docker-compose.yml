@@ -1,16 +1,4 @@
-services:
-  broker1:
-    image: eclipse-mosquitto:2
-    container_name: broker1
-    networks:
-      - jogo-distribuido-net
-    ports:
-      - "1883:1883"
-      - "9001:9001"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
-    restart: always
-    
+services:    
   servidor1:
     build: .
     container_name: servidor1
@@ -40,7 +28,7 @@ services:
       - "8092:8090"
     volumes:
       - ./data:/app/data
-    # REMOVIDO O depends_on
+
     command:
       - "/server"
       - "-id=servidor2"
@@ -69,6 +57,7 @@ services:
       - "-http_addr=:8090"
       # AGORA ELE CONHECE TODOS OS OUTROS
       - "-join_addrs=servidor1:8090,servidor2:8090"
+    
 
 networks:
   jogo-distribuido-net:

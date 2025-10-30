@@ -22,7 +22,7 @@ import (
 
 	"pbl_redes/protocolo"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	// mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
@@ -107,7 +107,7 @@ var (
 	packetStock        map[string]*protocolo.Packet
 	stockMu            sync.RWMutex
 	mu                 sync.Mutex
-	mqttClient         mqtt.Client
+	// mqttClient         mqtt.Client
 	raftNode           *raft.Raft
 	fsmRand            *rand.Rand
 
@@ -548,21 +548,21 @@ func (s *fsmSnapshot) Release()                             {}
 
 // --- LÓGICA DE PUBLICAÇÃO MQTT ---
 
-func publishToPlayer(salaID, login string, message protocolo.Message) {
-	if mqttClient == nil || !mqttClient.IsConnected() {
-		logger.Println(ColorYellow + "AVISO: Cliente MQTT não está conectado, pulando publicação." + ColorReset)
-		return
-	}
-	topic := fmt.Sprintf("game/%s/%s", salaID, login)
-	payload, _ := json.Marshal(message)
-	token := mqttClient.Publish(topic, 0, false, payload)
-	go func() {
-		_ = token.Wait()
-		if token.Error() != nil {
-			logger.Printf(ColorRed+"Erro ao publicar no tópico %s: %v"+ColorReset, topic, token.Error())
-		}
-	}()
-}
+// func publishToPlayer(salaID, login string, message protocolo.Message) {
+// 	if mqttClient == nil || !mqttClient.IsConnected() {
+// 		logger.Println(ColorYellow + "AVISO: Cliente MQTT não está conectado, pulando publicação." + ColorReset)
+// 		return
+// 	}
+// 	topic := fmt.Sprintf("game/%s/%s", salaID, login)
+// 	payload, _ := json.Marshal(message)
+// 	token := mqttClient.Publish(topic, 0, false, payload)
+// 	go func() {
+// 		_ = token.Wait()
+// 		if token.Error() != nil {
+// 			logger.Printf(ColorRed+"Erro ao publicar no tópico %s: %v"+ColorReset, topic, token.Error())
+// 		}
+// 	}()
+// }
 
 // --- PERSISTÊNCIA DE DADOS ---
 const playerDataFile = "data/players.json"
@@ -1141,14 +1141,13 @@ func startGameAndNotify(sala *Sala) {
 	logger.Printf(ColorGreen+"Líder: Enviando notificações de início de jogo para sala %s (P1: %s, P2: %s)"+ColorReset, salaID, p1Login, p2Login)
 
 	// Envia GAME_START via MQTT
-	publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2Login}})
-	publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1Login}})
+	notifyPlayer(p1Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p2Login}})
+	notifyPlayer(p2Login, protocolo.Message{Type: "GAME_START", Data: protocolo.GameStartMessage{Opponent: p1Login}})
 
 	time.Sleep(1 * time.Second) // Pequena pausa
 
-	// Envia primeiro TURN_UPDATE via MQTT
-	publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 1}})
-	publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 2}})
+	notifyPlayer(p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 1}})
+	notifyPlayer(p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: currentTurn == 2}})
 }
 
 // Pequena Modificação em sendPairing para receber login e roomID
@@ -1343,12 +1342,12 @@ func handlePlayNote(conn net.Conn, data interface{}) {
                   resultMsgP1 := roundResult
                   resultMsgP1.YourScore = currentP1Score // Usa pontuação lida
                   resultMsgP1.OpponentScore = currentP2Score
-                  publishToPlayer(salaID, p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
+                  notifyPlayer(p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
 
                   resultMsgP2 := roundResult
                   resultMsgP2.YourScore = currentP2Score // Usa pontuação lida
                   resultMsgP2.OpponentScore = currentP1Score
-                  publishToPlayer(salaID, p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
+                  notifyPlayer(p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
              }
 
              // Verifica se o jogo acabou
@@ -1369,10 +1368,10 @@ func handlePlayNote(conn net.Conn, data interface{}) {
                  p2CoinsEarned := finalP2Score*5 + (func() int { if winner == p2Login { return 20 }; return 0 }())
 
                  // Envia GAME_OVER via MQTT
-                  gameOverMsgP1 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p1CoinsEarned }
-                  publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
-                  gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
-                  publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
+                 gameOverMsgP1 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p1CoinsEarned }
+				 notifyPlayer(p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+				 gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
+				 notifyPlayer(p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
 
                   // Líder limpa o estado da sala (fora da FSM, após notificações)
                   mu.Lock()
@@ -1397,8 +1396,8 @@ func handlePlayNote(conn net.Conn, data interface{}) {
 					}
 				}
 				nextTurnPlayer := nextTurnPlayerInt
-                publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
-                publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
+				notifyPlayer(p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
+				notifyPlayer(p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
              }
         default:
             logger.Printf(ColorRed+"Erro: Resposta desconhecida da FSM para PLAY_NOTE_RAFT: %v"+ColorReset, fsmResp.response)
@@ -1826,6 +1825,29 @@ func broadcastNotificationToPlayer(targetLogin string, messageToSend protocolo.M
              logger.Printf(ColorCyan+"Broadcast de notificação para %s (via %s) enviado."+ColorReset, targetLogin, url)
         }(targetURL, jsonBody)
     }
+}
+
+// notifyPlayer é a nova "central de entrega" (só o Líder usa)
+func notifyPlayer(targetLogin string, messageToSend protocolo.Message) {
+    if raftNode.State() != raft.Leader {
+        return // Apenas o líder envia notificações
+    }
+
+    // 1. Tenta entregar localmente primeiro
+    mu.Lock()
+    targetPlayer, exists := players[targetLogin]
+    if exists && targetPlayer.Online && targetPlayer.Conn != nil {
+        // O jogador está conectado DIRETAMENTE AQUI (no Líder)
+        logger.Printf(ColorCyan+"[Notificação] Enviando msg '%s' para %s (local)"+ColorReset, messageToSend.Type, targetLogin)
+        sendJSON(targetPlayer.Conn, messageToSend)
+        mu.Unlock()
+        return // Entregue!
+    }
+    mu.Unlock()
+
+    // 2. Se não estava local, manda para os outros nós (Seguidores)
+    logger.Printf(ColorCyan+"[Notificação] Jogador %s não está local. Fazendo broadcast (via REST) para msg '%s' ..."+ColorReset, targetLogin, messageToSend.Type)
+    broadcastNotificationToPlayer(targetLogin, messageToSend)
 }
 
 // --- INTERPRETADOR E CONEXÃO ---
@@ -2369,9 +2391,9 @@ func startHttpApi(nodeID string, httpAddr string) {
                           var roundResult protocolo.RoundResultMessage
                           mapToStruct(roundResultData, &roundResult)
                           resultMsgP1 := roundResult; resultMsgP1.YourScore = currentP1Score; resultMsgP1.OpponentScore = currentP2Score
-                          publishToPlayer(salaID, p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
+                          notifyPlayer(p1Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP1})
                           resultMsgP2 := roundResult; resultMsgP2.YourScore = currentP2Score; resultMsgP2.OpponentScore = currentP1Score
-                          publishToPlayer(salaID, p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
+                          notifyPlayer(p2Login, protocolo.Message{Type: "ROUND_RESULT", Data: resultMsgP2})
                      }
                      // Verifica Game Over e envia MQTTs
                      if gameEnded, _ := resultData["gameEnded"].(bool); gameEnded {
@@ -2387,9 +2409,9 @@ func startHttpApi(nodeID string, httpAddr string) {
                            p1CoinsEarned := finalP1Score*5 + (func() int { if winner == p1Login { return 20 }; return 0 }())
                            p2CoinsEarned := finalP2Score*5 + (func() int { if winner == p2Login { return 20 }; return 0 }())
                            gameOverMsgP1 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p1CoinsEarned }
-                           publishToPlayer(salaID, p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
-                           gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
-                           publishToPlayer(salaID, p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
+						   notifyPlayer(p1Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP1})
+						   gameOverMsgP2 := protocolo.GameOverMessage{ Winner: winner, FinalScoreP1: finalP1Score, FinalScoreP2: finalP2Score, CoinsEarned: p2CoinsEarned }
+						   notifyPlayer(p2Login, protocolo.Message{Type: "GAME_OVER", Data: gameOverMsgP2})
                            // Líder limpa estado da sala
                            mu.Lock()
                            delete(playersInRoom, p1Login)
@@ -2408,10 +2430,9 @@ func startHttpApi(nodeID string, httpAddr string) {
 								logger.Printf(ColorRed+"[API REST] Erro CRÍTICO: 'nextTurn' não é nem int nem float64. Tipo: %T"+ColorReset, resultData["nextTurn"])
 							}
 						}
-						nextTurnPlayer := nextTurnPlayerInt // Usa o valor corrigido
-
-						publishToPlayer(salaID, p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
-						publishToPlayer(salaID, p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
+						nextTurnPlayer := nextTurnPlayerInt
+						notifyPlayer(p1Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 1}})
+						notifyPlayer(p2Login, protocolo.Message{Type: "TURN_UPDATE", Data: protocolo.TurnMessage{IsYourTurn: nextTurnPlayer == 2}})
 					}
                 }
                 responseToFollower = protocolo.Message{Type: "SCREEN_MSG", Data: protocolo.ScreenMessage{Content: "Nota jogada."}} // Confirmação simples
@@ -2561,7 +2582,7 @@ func main() {
 	}
 	// --- FIM DO BLOCO DE LÓGICA DE CLUSTER CORRIGIDO ---
 
-	go setupServerMQTTClient("tcp://broker1:1883", *nodeID)
+	// go setupServerMQTTClient("tcp://broker1:1883", *nodeID)
 
 	go startHttpApi(*nodeID, *httpAddr)
 
@@ -2608,27 +2629,27 @@ func main() {
 }
 
 // setupServerMQTTClient conecta o SERVIDOR ao broker MQTT
-func setupServerMQTTClient(brokerAddr string, nodeID string) {
-    opts := mqtt.NewClientOptions()
-    opts.AddBroker(brokerAddr)
-    // ID único para o cliente MQTT do *servidor*
-    opts.SetClientID(fmt.Sprintf("server-%s-%d", nodeID, time.Now().UnixNano()))
-    opts.SetAutoReconnect(true)
-    opts.SetConnectRetry(true)
-    opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-        logger.Printf(ColorRed+"[MQTT-Servidor] Conexão perdida com o broker: %v"+ColorReset, err)
-    })
-    opts.SetOnConnectHandler(func(client mqtt.Client) {
-        logger.Printf(ColorGreen+"[MQTT-Servidor] Conectado ao broker MQTT com sucesso!"+ColorReset)
-    })
+// func setupServerMQTTClient(brokerAddr string, nodeID string) {
+//     opts := mqtt.NewClientOptions()
+//     opts.AddBroker(brokerAddr)
+//     // ID único para o cliente MQTT do *servidor*
+//     opts.SetClientID(fmt.Sprintf("server-%s-%d", nodeID, time.Now().UnixNano()))
+//     opts.SetAutoReconnect(true)
+//     opts.SetConnectRetry(true)
+//     opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+//         logger.Printf(ColorRed+"[MQTT-Servidor] Conexão perdida com o broker: %v"+ColorReset, err)
+//     })
+//     opts.SetOnConnectHandler(func(client mqtt.Client) {
+//         logger.Printf(ColorGreen+"[MQTT-Servidor] Conectado ao broker MQTT com sucesso!"+ColorReset)
+//     })
 
-    mqttClient = mqtt.NewClient(opts)
-    if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-        logger.Fatalf(ColorRed+"Falha fatal ao conectar o servidor ao broker MQTT: %v"+ColorReset, token.Error())
-    } else if token.Error() != nil {
-        logger.Printf(ColorYellow+"[MQTT-Servidor] Aviso: %v"+ColorReset, token.Error())
-    }
-}
+//     mqttClient = mqtt.NewClient(opts)
+//     if token := mqttClient.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
+//         logger.Fatalf(ColorRed+"Falha fatal ao conectar o servidor ao broker MQTT: %v"+ColorReset, token.Error())
+//     } else if token.Error() != nil {
+//         logger.Printf(ColorYellow+"[MQTT-Servidor] Aviso: %v"+ColorReset, token.Error())
+//     }
+// }
 
 // --- FUNÇÃO JOINCLUSTER ---
 func joinCluster(joinAddrs, nodeID, raftAddr string) error {
