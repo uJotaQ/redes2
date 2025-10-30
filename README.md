@@ -4,7 +4,7 @@ Aqui está o README formatado em Markdown, pronto para você copiar e colar dire
 
 # PBL\_REDES - Jogo Rítmico Distribuído
 
-**Autor**: Leonardo Oliveira Almeida da Cruz ([@oLeozito](https://www.google.com/search?q=https://github.com/oLeozito))
+**Autores**: Leonardo Oliveira Almeida da Cruz ([@oLeozito](https://www.google.com/search?q=https://github.com/oLeozito)) e João Gabriel Santos Silva ([@uJotaQ](https://www.google.com/search?q=https://github.com/uJotaQ))
 **Disciplina**: TEC502 - Redes e Conectividade (PBL)
 
 Este projeto implementa um servidor de jogo multiplayer distribuído, tolerante a falhas e escalável, como parte da avaliação da disciplina. O sistema foi projetado para migrar uma arquitetura de servidor de jogo centralizado para um cluster de nós distribuídos que gerenciam o estado do jogo de forma consistente.
