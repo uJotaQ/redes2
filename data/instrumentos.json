@@ -1,0 +1,142 @@
+[
+  {
+    "id": "VIOLIN_001",
+    "name": "Violino",
+    "rarity": "Raro",
+    "attacks": [
+      { "name": "Vibrato", "sequence": ["A", "B", "G"] },
+      { "name": "Pizzicato", "sequence": ["C", "E", "G"] },
+      { "name": "Spiccato", "sequence": ["F", "A", "C"] }
+    ]
+  },
+  {
+    "id": "GUITAR_001",
+    "name": "Guitarra",
+    "rarity": "Épico",
+    "attacks": [
+      { "name": "Power Chord", "sequence": ["E", "A", "D"] },
+      { "name": "Solo Rápido", "sequence": ["G", "B", "E"] },
+      { "name": "Palm Mute", "sequence": ["E", "E", "A"] }
+    ]
+  },
+  {
+    "id": "FLUTE_001",
+    "name": "Flauta",
+    "rarity": "Comum",
+    "attacks": [
+      { "name": "Trinado", "sequence": ["C", "D", "E"] },
+      { "name": "Sopro Forte", "sequence": ["F", "G", "C"] },
+      { "name": "Melodia Doce", "sequence": ["A", "B", "C"] }
+    ]
+  },
+  {
+    "id": "PIANO_001",
+    "name": "Piano",
+    "rarity": "Épico",
+    "attacks": [
+      { "name": "Arpejo", "sequence": ["C", "E", "G"] },
+      { "name": "Glissando", "sequence": ["D", "F", "A"] },
+      { "name": "Acorde Pesado", "sequence": ["E", "G", "B"] }
+    ]
+  },
+  {
+    "id": "TRUMPET_001",
+    "name": "Trompete",
+    "rarity": "Raro",
+    "attacks": [
+      { "name": "Susto Sonoro", "sequence": ["C", "G", "C"] },
+      { "name": "Escalada", "sequence": ["D", "F", "A"] },
+      { "name": "Sopro Metálico", "sequence": ["E", "A", "B"] }
+    ]
+  },
+  {
+    "id": "DRUM_001",
+    "name": "Bateria",
+    "rarity": "Épico",
+    "attacks": [
+      { "name": "Rufar", "sequence": ["C", "C", "C"] },
+      { "name": "Virada", "sequence": ["E", "G", "A"] },
+      { "name": "Prato Explosivo", "sequence": ["F", "B", "E"] }
+    ]
+  },
+  {
+    "id": "HARP_001",
+    "name": "Harpa",
+    "rarity": "Lendário",
+    "attacks": [
+      { "name": "Arpejo Celestial", "sequence": ["C", "F", "A"] },
+      { "name": "Glissando Suave", "sequence": ["D", "G", "B"] },
+      { "name": "Eco Etéreo", "sequence": ["E", "A", "C"] }
+    ]
+  },
+  {
+    "id": "SAX_001",
+    "name": "Saxofone",
+    "rarity": "Raro",
+    "attacks": [
+      { "name": "Improviso Jazz", "sequence": ["E", "G", "B"] },
+      { "name": "Sopro Grave", "sequence": ["C", "E", "A"] },
+      { "name": "Nota Sustentada", "sequence": ["D", "F", "G"] }
+    ]
+  },
+  {
+    "id": "OBOE_001",
+    "name": "Oboé",
+    "rarity": "Comum",
+    "attacks": [
+      { "name": "Melodia Suave", "sequence": ["C", "D", "E"] },
+      { "name": "Sopro Agudo", "sequence": ["F", "A", "B"] },
+      { "name": "Eco Vibrante", "sequence": ["G", "B", "C"] }
+    ]
+  },
+  {
+    "id": "BASS_001",
+    "name": "Contrabaixo",
+    "rarity": "Raro",
+    "attacks": [
+      { "name": "Slap", "sequence": ["E", "A", "D"] },
+      { "name": "Walking Bass", "sequence": ["G", "B", "E"] },
+      { "name": "Grave Profundo", "sequence": ["C", "E", "A"] }
+    ]
+  },
+  {
+    "id": "BANJO_001",
+    "name": "Banjo",
+    "rarity": "Comum",
+    "attacks": [
+      { "name": "Dedilhado", "sequence": ["C", "G", "B"] },
+      { "name": "Rasgueado", "sequence": ["D", "A", "E"] },
+      { "name": "Bluegrass", "sequence": ["F", "G", "C"] }
+    ]
+  },
+  {
+    "id": "TAMBO_001",
+    "name": "Tambor",
+    "rarity": "Comum",
+    "attacks": [
+      { "name": "Batida Rítmica", "sequence": ["C", "C", "G"] },
+      { "name": "Toque Seco", "sequence": ["D", "F", "A"] },
+      { "name": "Rufada Tribal", "sequence": ["E", "A", "C"] }
+    ]
+  },
+  {
+    "id": "ACCORD_001",
+    "name": "Acordeon",
+    "rarity": "Raro",
+    "attacks": [
+      { "name": "Expansão de Fole", "sequence": ["C", "E", "A"] },
+      { "name": "Contra-Melodia", "sequence": ["D", "G", "B"] },
+      { "name": "Dança Gaúcha", "sequence": ["F", "A", "C"] }
+    ]
+  },
+  {
+    "id": "UKULE_001",
+    "name": "Ukulele",
+    "rarity": "Comum",
+    "attacks": [
+      { "name": "Acorde Leve", "sequence": ["C", "E", "G"] },
+      { "name": "Ritmo Havaiano", "sequence": ["D", "G", "A"] },
+      { "name": "Ponte Alegre", "sequence": ["E", "A", "C"] }
+    ]
+  }
+]

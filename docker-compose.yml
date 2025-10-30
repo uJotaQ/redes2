@@ -1,30 +1,64 @@
-version: '3.8'
-services:
-  server:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
+services:    
+  servidor1:
+    build: .
+    container_name: servidor1
+    networks:
+      - jogo-distribuido-net
     ports:
-      - "8080:8080"
-  client1:
-    build:
-      context: .
-      dockerfile: Dockerfile.client
-    environment:
-      - SERVER=server:8080
-      - CLIENT_ID=player1
-      - TOPICS=game/1/events,game/1/chat
-    depends_on:
-      - server
-    tty: true
-  client2:
-    build:
-      context: .
-      dockerfile: Dockerfile.client
-    environment:
-      - SERVER=server:8080
-      - CLIENT_ID=player2
-      - TOPICS=game/1/events
-    depends_on:
-      - server
-    tty: true
+      - "8081:8080"
+      - "8091:8090"
+    volumes:
+      - ./data:/app/data
+    command:
+      - "/server"
+      - "-id=servidor1"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor1:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE TENTA SE JUNTAR AOS OUTROS
+      - "-join_addrs=servidor2:8090,servidor3:8090"
+
+  servidor2:
+    build: .
+    container_name: servidor2
+    networks:
+      - jogo-distribuido-net
+    ports:
+      - "8082:8080"
+      - "8092:8090"
+    volumes:
+      - ./data:/app/data
+
+    command:
+      - "/server"
+      - "-id=servidor2"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor2:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE CONHECE TODOS OS OUTROS
+      - "-join_addrs=servidor1:8090,servidor3:8090"
+
+  servidor3:
+    build: .
+    container_name: servidor3
+    networks:
+      - jogo-distribuido-net
+    ports:
+      - "8083:8080"
+      - "8093:8090"
+    volumes:
+      - ./data:/app/data
+    # REMOVIDO O depends_on
+    command:
+      - "/server"
+      - "-id=servidor3"
+      - "-tcp_addr=:8080"
+      - "-raft_addr=servidor3:12000"
+      - "-http_addr=:8090"
+      # AGORA ELE CONHECE TODOS OS OUTROS
+      - "-join_addrs=servidor1:8090,servidor2:8090"
+    
+
+networks:
+  jogo-distribuido-net:
+    driver: bridge
