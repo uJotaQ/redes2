@@ -579,6 +579,28 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		return fsmApplyResponse{response: "OK"}
 
+	case "RECONNECT_SESSION_RAFT":
+        playerLogin := cmdPayload // O payload é só o login
+        mu.Lock()
+        defer mu.Unlock()
+
+        player, exists := players[playerLogin]
+        if !exists {
+            // Se o jogador nem existe mais (improvável, mas possível), erro.
+            return fsmApplyResponse{response: "PLAYER_NOT_FOUND"}
+        }
+        if !player.Online {
+            // Se o Raft state já foi corrigido (ex: por um logout via timeout que não implementamos,
+            // ou se o cliente se enganou), a reconexão falha.
+            logger.Printf("[FSM] Tentativa de reconexão de %s falhou (sessão não estava online).", playerLogin)
+            return fsmApplyResponse{response: "SESSION_NOT_ACTIVE"}
+        }
+
+        // Se chegou aqui, o jogador existe E está Online=true no Raft.
+        logger.Printf("[FSM] Reconexão da sessão de %s validada.", playerLogin)
+        // Não muda nada no estado replicado, só confirma.
+        return fsmApplyResponse{response: "RECONNECTED_OK"}
+
 	default:
 		logger.Printf(ColorRed+"[FSM] Comando desconhecido recebido: %s"+ColorReset, cmdType)
 		return fsmApplyResponse{err: fmt.Errorf("comando FSM desconhecido: %s", cmdType)}
@@ -772,6 +794,66 @@ func cadastrarUser(conn net.Conn, data protocolo.SignInRequest) {
 		// Sucesso
 		sendJSON(conn, protocolo.Message{Type: "CADASTRO_RESPONSE", Data: protocolo.CadastroResponse{Status: "OK", Message: "Cadastro realizado com sucesso!"}})
 	}
+}
+
+func reconnectSession(conn net.Conn, playerLogin string) string { // Retorna o status ("RECONNECTED_OK" ou erro)
+    if playerLogin == "" {
+        return "INVALID_REQUEST"
+    }
+
+    // --- Lógica Líder/Seguidor ---
+    if raftNode.State() != raft.Leader {
+        // Seguidor: Encaminha para o líder via REST
+        leaderRaftAddr := string(raftNode.Leader())
+        if leaderRaftAddr == "" { return "ERROR_LEADER_UNKNOWN" }
+        leaderHttpAddr := strings.Replace(leaderRaftAddr, ":12000", ":8090", 1)
+        reqURL := fmt.Sprintf("http://%s/request-reconnect", leaderHttpAddr)
+        payload := map[string]string{"playerLogin": playerLogin}
+        postBody, _ := json.Marshal(payload)
+
+        client := http.Client{Timeout: 3 * time.Second}
+        resp, err := client.Post(reqURL, "application/json", bytes.NewBuffer(postBody))
+        if err != nil { return "ERROR_CONNECTING_LEADER" }
+        defer resp.Body.Close()
+
+        var reconnectResp struct { Status string } // Espera uma resposta simples { "status": "..." }
+        if err := json.NewDecoder(resp.Body).Decode(&reconnectResp); err != nil {
+            return "ERROR_LEADER_RESPONSE"
+        }
+
+        // Se o Líder confirmou ("RECONNECTED_OK"), associa a Conn localmente AQUI no Seguidor
+        if reconnectResp.Status == "RECONNECTED_OK" {
+            mu.Lock()
+            if player, exists := players[playerLogin]; exists {
+                player.Conn = conn // Associa a conexão volátil local
+                logger.Printf(ColorGreen+"Sessão de %s reconectada (via seguidor)."+ColorReset, playerLogin)
+            }
+            mu.Unlock()
+        }
+        return reconnectResp.Status // Retorna o status que o Líder mandou
+
+    } else {
+        // Líder: Aplica no RAFT
+        logger.Printf(ColorGreen+"Sou o líder. Processando reconexão de %s via RAFT."+ColorReset, playerLogin)
+        cmd := []byte("RECONNECT_SESSION_RAFT:" + playerLogin)
+        future := raftNode.Apply(cmd, 500*time.Millisecond)
+        if err := future.Error(); err != nil { return "ERROR_RAFT" }
+
+        fsmResp := future.Response().(fsmApplyResponse)
+        if fsmResp.err != nil { return "ERROR_FSM" }
+
+        status, _ := fsmResp.response.(string) // Espera "RECONNECTED_OK" ou erro da FSM
+
+        // Se a FSM confirmou ("RECONNECTED_OK"), associa a Conn localmente AQUI no Líder
+        if status == "RECONNECTED_OK" {
+            mu.Lock()
+            if player, exists := players[playerLogin]; exists {
+                player.Conn = conn // Associa a conexão volátil local
+            }
+            mu.Unlock()
+        }
+        return status
+    }
 }
 
 // OUTRAS FUNCOES---
@@ -2010,6 +2092,23 @@ func interpreter(conn net.Conn, fullMessage string) (bool, string) {
 		// Apenas retorna 'false' para quebrar o loop na handleConnection.
 		return false, "" // Corrigido
 
+	case "RECONNECT_SESSION":
+        var data struct { Login string } // Espera { "Login": "..." }
+        mapToStruct(msg.Data, &data)
+        
+        status := reconnectSession(conn, data.Login) // Chama o wrapper
+        
+        // Envia uma resposta simples para o cliente saber o resultado
+        sendJSON(conn, protocolo.Message{Type: "RECONNECT_RESPONSE", Data: map[string]string{"status": status}})
+        
+        // Se a reconexão falhou, NÃO retorna o login para handleConnection,
+        // forçando o cliente a ir para LoginState na próxima iteração.
+        // Se deu certo ("RECONNECTED_OK"), retorna o login para manter a sessão.
+        if status == "RECONNECTED_OK" {
+             return true, data.Login // Mantém a sessão ativa
+        }
+        return true, ""
+
 	default:
 		sendScreenMsg(conn, "Comando inválido.")
 		return true, "" // Corrigido
@@ -2545,6 +2644,43 @@ func startHttpApi(nodeID string, httpAddr string) {
 
 		w.WriteHeader(http.StatusOK) // Só confirma que recebeu
 	})
+
+	mux.HandleFunc("/request-reconnect", func(w http.ResponseWriter, r *http.Request) {
+        if raftNode.State() != raft.Leader {
+            http.Error(w, "Não sou o líder.", http.StatusServiceUnavailable)
+            return
+        }
+        var reqBody map[string]string
+        if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+            http.Error(w, "Corpo inválido", http.StatusBadRequest)
+            return
+        }
+        playerLogin := reqBody["playerLogin"]
+        if playerLogin == "" {
+             http.Error(w, "Login ausente", http.StatusBadRequest)
+            return
+        }
+
+        logger.Printf(ColorCyan+"[API REST] Recebido pedido de reconexão para %s"+ColorReset, playerLogin)
+
+        // Aplica no RAFT
+        cmd := []byte("RECONNECT_SESSION_RAFT:" + playerLogin)
+        future := raftNode.Apply(cmd, 500*time.Millisecond)
+        if err := future.Error(); err != nil {
+             json.NewEncoder(w).Encode(map[string]string{"status": "ERROR_RAFT"})
+             return
+        }
+        fsmResp := future.Response().(fsmApplyResponse)
+        if fsmResp.err != nil {
+             json.NewEncoder(w).Encode(map[string]string{"status": "ERROR_FSM"})
+             return
+        }
+
+        status, _ := fsmResp.response.(string)
+        // O Líder NÃO associa Conn aqui (a Conn está no Seguidor). Ele só retorna o status.
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]string{"status": status})
+    })
 
 	logger.Printf(ColorYellow+"API REST para gerenciamento do cluster escutando em %s"+ColorReset, httpAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {

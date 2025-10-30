@@ -348,28 +348,32 @@ func main() {
 	userInputReader := bufio.NewReader(os.Stdin)
 
 ReconnectLoop:
-	for {
-		conn := connectToServer(serverAddresses)
-		if conn == nil {
-			fmt.Println("Nenhum servidor disponível. Tentando novamente em 5 segundos...")
-			time.Sleep(5 * time.Second)
-			continue ReconnectLoop
-		}
+    for {
+        conn := connectToServer(serverAddresses)
+        // ... (check if conn == nil) ...
 
-		writer := bufio.NewWriter(conn)
-		gameChannel := make(chan protocolo.Message)
-		// Inicia a goroutine para ler da conexão
-		go interpreterTCP(conn, gameChannel)
+        writer := bufio.NewWriter(conn)
+        gameChannel := make(chan protocolo.Message)
+        go interpreterTCP(conn, gameChannel)
 
-		// Reseta o estado apenas se for a primeira conexão
-		if currentUser == "" {
-			currentState = LoginState
-		} else {
-			// Se já estava logado, talvez volte ao Menu? Ou tente um Reconnect?
-			// Por enquanto, vamos manter o estado, mas pode precisar de lógica de re-autenticação.
-			fmt.Println("[INFO] Reconectado. Voltando ao menu principal.")
-			currentState = MenuState // Volta ao menu após reconectar
-		}
+        // --- LÓGICA DE RECONEXÃO ---
+        if currentUser == "" {
+            currentState = LoginState // Primeira vez ou falha na reconexão anterior
+        } else {
+            // JÁ ESTAVA LOGADO ANTES DA QUEDA! Tenta revalidar a sessão.
+            fmt.Printf("[INFO] Reconectado como %s. Tentando revalidar sessão...\n", currentUser)
+            
+            // Envia o novo comando imediatamente
+            reqData := map[string]string{"Login": currentUser}
+            if err := sendJSON(writer, protocolo.Message{Type: "RECONNECT_SESSION", Data: reqData}); err != nil {
+                 fmt.Printf("[ERRO] Falha ao enviar pedido de reconexão: %v\n", err)
+                 // Se falhar ao enviar, melhor forçar login
+                 currentUser = ""
+                 currentState = LoginState
+            } else {
+                 currentState = StopState // Aguarda a RECONNECT_RESPONSE
+            }
+        }
 
 		// Loop principal do jogo/aplicação
 		for {
@@ -517,6 +521,19 @@ ReconnectLoop:
 					fmt.Println("Voltando para o menu principal em 5 segundos...")
 					time.Sleep(5 * time.Second)
 					currentState = MenuState
+				
+				case "RECONNECT_RESPONSE":
+                    var data map[string]string
+                    mapToStruct(msg.Data, &data)
+                    status := data["status"]
+                    if status == "RECONNECTED_OK" {
+                        fmt.Println("[INFO] Sessão revalidada com sucesso! Voltando ao menu.")
+                        currentState = MenuState // Sucesso! Vai pro menu.
+                    } else {
+                        fmt.Printf("[AVISO] Falha ao revalidar sessão (%s). Por favor, faça login novamente.\n", status)
+                        currentUser = "" // Esquece o usuário antigo
+                        currentState = LoginState // Falhou! Vai pro login.
+                    }
 
 				default:
 					fmt.Printf("\n[AVISO] Mensagem TCP de tipo desconhecido recebida: %s\n", msg.Type)
